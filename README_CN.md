@@ -8,7 +8,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/语言-C%20%7C%20Python-blue" alt="Language">
-    <img src="https://img.shields.io/badge/平台-Linux%20(x86__64%20%7C%20arm64)-green" alt="Platform">
+    <img src="https://img.shields.io/badge/平台-Linux%20(x86__64)-green" alt="Platform">
     <img src="https://img.shields.io/badge/内核-5.8%2B-orange" alt="Kernel">
     <img src="https://img.shields.io/badge/license-CC--BY--NC--SA%204.0-lightgrey" alt="License">
     <img src="https://img.shields.io/badge/构建方式-Vibe%20Coding%20🎵-ff69b4" alt="Vibe Coding">
