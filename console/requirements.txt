@@ -1,0 +1,2 @@
+pyelftools>=0.29
+colorama>=0.4.6
