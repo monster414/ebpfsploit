@@ -1,46 +1,46 @@
 /*
- * eBPFsploit 模块开发模板
- * ========================
+ * eBPFsploit Module Development Template
+ * ====================================
  *
- * 使用本模板快速开发新的 eBPF 模块。
+ * Use this template to quickly develop new eBPF modules.
  *
- *  开发流程：
- *   1. 复制本文件并重命名为 <your_module>.bpf.c
- *   2. 修改 .metadata section 中的模块描述、依赖和配置
- *   3. 定义你的 BPF Maps
- *   4. 实现 Hook 函数
- *   5. make modules 编译
- *   6. 编译产物自动输出到 console/modules/<your_module>.bpf.o
+ *  Development Workflow:
+ *   1. Copy this file and rename it to <your_module>.bpf.c
+ *   2. Modify the description, dependencies, and configuration in the .metadata section
+ *   3. Define your BPF Maps
+ *   4. Implement the Hook functions
+ *   5. Run `make modules` to compile
+ *   6. The compiled binary will be automatically output to console/modules/<your_module>.bpf.o
  *
- *  支持的 Hook 类型（Agent 自动识别并挂载）：
+ *  Supported Hook Types (Agent automatically detects and attaches):
  *   - Tracepoint:     SEC("tp/syscalls/sys_enter_xxx")
  *   - Kprobe:         SEC("kprobe/function_name")
  *   - Kretprobe:      SEC("kretprobe/function_name")
- *   - Uprobe:         SEC("uprobe")          — Agent 自动解析 libcrypt 路径
- *   - Uretprobe:      SEC("uretprobe")       — Agent 自动解析 libcrypt 路径
- *   - XDP:            SEC("xdp")             — 需要 -i <iface> 或 config[64] 指定网卡
- *   - LSM:            SEC("lsm/hook_name")   — 需要内核 LSM BPF 支持
+ *   - Uprobe:         SEC("uprobe")          — Agent automatically resolves libcrypt path
+ *   - Uretprobe:      SEC("uretprobe")       — Agent automatically resolves libcrypt path
+ *   - XDP:            SEC("xdp")             — Requires -i <iface> or config[64] to specify network interface
+ *   - LSM:            SEC("lsm/hook_name")   — Requires kernel LSM BPF support
  *
- *  .metadata JSON 字段说明：
- *   - name:      模块名（与文件名一致，不含 .bpf.c）
- *   - desc:      模块描述（显示在 list 命令中）
- *   - requires:  前置要求数组，Console 自动检查可用性
- *       可选值: "is_root", "tracefs", "probe_write", "uprobe",
- *               "kprobe", "xdp", "lsm_bpf", "cap_mac_admin", "cap_net_admin"
- *   - options:   加载时配置 {KEY: [默认值, 描述]}
- *       Console 的 set/show options 会读取此字段
- *       加载时写入 config[0:96] 传给 Agent
- *   - maps:      运行时可更新的 Map 信息 {map名: {key_size, value_size, key_type, value_type}}
+ *  .metadata JSON Field Definitions:
+ *   - name:      Module name (same as filename, without .bpf.c)
+ *   - desc:      Module description (shown in the `list` command)
+ *   - requires:  Prerequisites array. The Console automatically checks for availability.
+ *       Valid values: "is_root", "tracefs", "probe_write", "uprobe",
+ *                     "kprobe", "xdp", "lsm_bpf", "cap_mac_admin", "cap_net_admin"
+ *   - options:   Load-time configuration {KEY: [default_value, description]}
+ *       Console's set/show options will read this field.
+ *       Written to config[0:96] during loading and passed to Agent.
+ *   - maps:      Runtime updateable Map information {map_name: {key_size, value_size, key_type, value_type}}
  *       key_type/value_type: "u8", "u16", "u32", "u64", "str"
- *       Console 的 update 命令根据此信息自动打包 key/value
+ *       Console's update command automatically packs key/value based on this info.
  *
- *  BPF Map 配置约定：
- *   - Array Map（如 inject_payload, master_password）：
- *       key=0，value 为配置数据。加载时自动从 config 写入。
- *       运行时通过 update <sess> <map_name> "new_value" 更新。
- *   - Hash Map（如 hidden_pids, hidden_ports）：
- *       key=目标项，value=1 表示启用。
- *       运行时通过 update <sess> <map_name> <key> 添加条目。
+ *  BPF Map Configuration Conventions:
+ *   - Array Map (e.g., inject_payload, master_password):
+ *       key=0, value is configuration data. Automatically written from config during load.
+ *       Update at runtime via: update <sess> <map_name> "new_value".
+ *   - Hash Map (e.g., hidden_pids, hidden_ports):
+ *       key=target_item, value=1 means enabled.
+ *       Add entries at runtime via: update <sess> <map_name> <key>.
  */
 
 #include "vmlinux.h"
@@ -51,17 +51,17 @@
 char LICENSE[] SEC("license") = "GPL";
 
 /* ================================================================
- * .metadata — Console 通过 pyelftools 从此 ELF section 读取模块信息
+ * .metadata — Console uses pyelftools to read module information from this ELF section
  *
- * 请根据你的模块修改以下内容：
+ * Please modify the following content according to your module:
  * ================================================================ */
 char _metadata[] __attribute__((used, section(".metadata"))) =
     "{"
       "\"name\":\"template\","
-      "\"desc\":\"模块模板：请替换为你的功能描述\","
+      "\"desc\":\"Module Template: Replace this with your feature description\","
       "\"requires\":[\"is_root\",\"tracefs\"],"
       "\"options\":{"
-        "\"MY_OPTION\":[\"default_value\",\"选项描述（显示在 show options 中）\"]"
+        "\"MY_OPTION\":[\"default_value\",\"Option description (shown in `show options`)\"]"
       "},"
       "\"maps\":{"
         "\"my_config\":{\"key_size\":4,\"value_size\":64,\"key_type\":\"u32\",\"value_type\":\"str\"},"
@@ -72,16 +72,16 @@ char _metadata[] __attribute__((used, section(".metadata"))) =
 /* ================================================================
  * BPF Maps
  *
- * Array Map: 用于存储配置数据（如 payload、密码等）
- *   - 加载时由 Agent 自动写入 options 中的初始值
- *   - 运行时可通过 update <sess> my_config "new_value" 更新
+ * Array Map: Used to store configuration data (e.g., payload, passwords)
+ *   - Initialized automatically by the Agent from options during load.
+ *   - Can be updated at runtime via: update <sess> my_config "new_value"
  *
- * Hash Map: 用于存储目标集合（如要隐藏的 PID、端口等）
- *   - 运行时通过 update <sess> my_targets <key> 添加条目
- *   - value 默认为 1（表示该 key 存在于集合中）
+ * Hash Map: Used to store target sets (e.g., PIDs or ports to hide)
+ *   - Add entries at runtime via: update <sess> my_targets <key>
+ *   - value defaults to 1 (indicating the key exists in the set)
  * ================================================================ */
 
-/* 示例 Array Map：存储可配置的字符串数据 */
+/* Example Array Map: Store configurable string data */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -89,7 +89,7 @@ struct {
     __type(value, char[64]);
 } my_config SEC(".maps");
 
-/* 示例 Hash Map：存储目标集合（如 PID、端口号等） */
+/* Example Hash Map: Store target sets (e.g., PIDs, port numbers) */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
@@ -97,7 +97,7 @@ struct {
     __type(value, u32);
 } my_targets SEC(".maps");
 
-/* 示例 Per-CPU 暂存区：用于需要大缓冲区的场景（规避 512B 栈限制） */
+/* Example Per-CPU Scratch Area: For scenarios requiring large buffers (evading 512B stack limit) */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
@@ -106,47 +106,47 @@ struct {
 } scratch SEC(".maps");
 
 /* ================================================================
- * Hook 函数
+ * Hook Functions
  *
- * 以下提供几种常见 Hook 类型的模板，按需保留或删除。
+ * Below are templates for several common Hook types. Keep or delete as needed.
  * ================================================================ */
 
-/* ---- 示例 1: Tracepoint Hook（最常用）----
+/* ---- Example 1: Tracepoint Hook (Most common) ----
  *
- * Hook 系统调用入口/出口。适用于文件操作、进程操作等场景。
- * 入口函数通过 ctx->args[] 获取系统调用参数。
- * 出口函数通过 ctx->ret 获取返回值。
+ * Hooks syscall entry/exit. Suitable for file operations, process ops, etc.
+ * The entry function accesses syscall arguments via ctx->args[].
+ * The exit function accesses the return value via ctx->ret.
  *
- * 常用 Tracepoint：
- *   tp/syscalls/sys_enter_openat   — 文件打开
- *   tp/syscalls/sys_exit_openat    — 文件打开返回
- *   tp/syscalls/sys_enter_read     — 文件读取
- *   tp/syscalls/sys_exit_read      — 文件读取返回
- *   tp/syscalls/sys_enter_write    — 文件写入
- *   tp/syscalls/sys_enter_getdents64 — 目录读取（进程隐藏用）
- *   tp/syscalls/sys_exit_getdents64  — 目录读取返回
- *   tp/syscalls/sys_exit_execve    — 进程执行返回
- *   tp/syscalls/sys_enter_close    — 文件关闭
+ * Common Tracepoints:
+ *   tp/syscalls/sys_enter_openat   — File open
+ *   tp/syscalls/sys_exit_openat    — File open return
+ *   tp/syscalls/sys_enter_read     — File read
+ *   tp/syscalls/sys_exit_read      — File read return
+ *   tp/syscalls/sys_enter_write    — File write
+ *   tp/syscalls/sys_enter_getdents64 — Directory read (used for process hiding)
+ *   tp/syscalls/sys_exit_getdents64  — Directory read return
+ *   tp/syscalls/sys_exit_execve    — Process execution return
+ *   tp/syscalls/sys_enter_close    — File close
  */
 SEC("tp/syscalls/sys_enter_openat")
 int handle_openat_enter(struct trace_event_raw_sys_enter *ctx) {
     /* ctx->args[0] = dirfd
-     * ctx->args[1] = filename (用户空间指针)
+     * ctx->args[1] = filename (user-space pointer)
      * ctx->args[2] = flags
      * ctx->args[3] = mode
      */
     const char *filename = (const char *)ctx->args[1];
 
-    /* 读取用户空间的文件名 */
+    /* Read filename from user space */
     char fname[32];
     bpf_probe_read_user_str(&fname, sizeof(fname), filename);
 
-    /* 示例：匹配特定文件路径 */
+    /* Example: Match specific file path */
     if (fname[0] == '/' && fname[1] == 'e' /* ... */) {
         u64 pid_tgid = bpf_get_current_pid_tgid();
         u32 pid = pid_tgid >> 32;
 
-        /* 检查是否在目标集合中 */
+        /* Check if inside target set */
         // if (bpf_map_lookup_elem(&my_targets, &pid)) { ... }
 
         bpf_printk("TEMPLATE: openat intercepted, pid=%d\n", pid);
@@ -156,20 +156,20 @@ int handle_openat_enter(struct trace_event_raw_sys_enter *ctx) {
 
 SEC("tp/syscalls/sys_exit_openat")
 int handle_openat_exit(struct trace_event_raw_sys_exit *ctx) {
-    /* ctx->ret = 返回的文件描述符 (< 0 表示失败) */
+    /* ctx->ret = Returned file descriptor (< 0 means failure) */
     if (ctx->ret < 0)
         return 0;
 
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    /* 在此处理 openat 的返回值，例如记录 fd */
+    /* Handle openat return value here, e.g., record the fd */
 
     return 0;
 }
 
-/* ---- 示例 2: Kprobe Hook ----
+/* ---- Example 2: Kprobe Hook ----
  *
- * Hook 内核函数。适用于需要拦截内核行为的场景。
- * 注意：kprobe 依赖内核符号，不同版本可能不兼容。
+ * Hooks kernel functions. Suitable for intercepting internal kernel boundaries.
+ * Note: kprobes rely on kernel symbols, which may be incompatible across versions.
  */
 // SEC("kprobe/tcp_v4_connect")
 // int BPF_KPROBE(hook_tcp_connect, struct sock *sk) {
@@ -178,29 +178,29 @@ int handle_openat_exit(struct trace_event_raw_sys_exit *ctx) {
 //     return 0;
 // }
 
-/* ---- 示例 3: LSM Hook ----
+/* ---- Example 3: LSM Hook ----
  *
- * 利用 Linux Security Module 框架的 BPF 扩展。
- * 返回 0 允许操作，返回负值（如 -EACCES = -13）拒绝操作。
- * 需要内核启用 CONFIG_BPF_LSM 且 lsm= 参数包含 "bpf"。
+ * Uses the Linux Security Module (LSM) BPF extension.
+ * Return 0 to allow the operation, or a negative value (e.g., -EACCES = -13) to deny.
+ * Requires kernel CONFIG_BPF_LSM and "bpf" included in the `lsm=` boot parameter.
  */
 // SEC("lsm/file_open")
 // int BPF_PROG(restrict_file_open, struct file *file) {
-//     /* 获取 inode 号 */
+//     /* Get inode number */
 //     u64 ino = BPF_CORE_READ(file, f_inode, i_ino);
 //
-//     /* 检查是否在受保护集合中 */
+//     /* Check if in protected set */
 //     if (bpf_map_lookup_elem(&my_targets, &ino))
 //         return -13; /* -EACCES */
 //
-//     return 0; /* 允许 */
+//     return 0; /* Allow */
 // }
 
-/* ---- 示例 4: XDP Hook ----
+/* ---- Example 4: XDP Hook ----
  *
- * 在网卡驱动层处理数据包，性能极高。
- * 返回值：XDP_PASS（放行）、XDP_DROP（丢弃）、XDP_TX（原路返回）
- * 适用于网络流量过滤、端口隐藏等场景。
+ * Processes packets at the NIC driver layer for extreme performance.
+ * Return values: XDP_PASS (allow), XDP_DROP (drop), XDP_TX (reflect back).
+ * Suitable for network traffic filtering, port hiding, etc.
  */
 // SEC("xdp")
 // int my_xdp_prog(struct xdp_md *ctx) {
@@ -211,29 +211,29 @@ int handle_openat_exit(struct trace_event_raw_sys_exit *ctx) {
 //     if ((void *)(eth + 1) > data_end)
 //         return XDP_PASS;
 //
-//     /* 解析 IP/TCP 头并判断 ... */
+//     /* Parse IP/TCP headers and make decisions ... */
 //     return XDP_PASS;
 // }
 
 /* ================================================================
- * 常用 BPF Helper 函数速查
+ * Common BPF Helper Functions Quick Reference
  *
- * bpf_get_current_pid_tgid()         — 获取当前 PID/TGID
- * bpf_get_current_uid_gid()          — 获取当前 UID/GID
- * bpf_get_current_comm(buf, size)    — 获取当前进程名
- * bpf_get_current_task()             — 获取 task_struct 指针
+ * bpf_get_current_pid_tgid()         — Get current PID/TGID
+ * bpf_get_current_uid_gid()          — Get current UID/GID
+ * bpf_get_current_comm(buf, size)    — Get current process name
+ * bpf_get_current_task()             — Get task_struct pointer
  *
- * bpf_probe_read_user(dst, sz, src)      — 读取用户空间内存
- * bpf_probe_read_user_str(dst, sz, src)  — 读取用户空间字符串
- * bpf_probe_read_kernel(dst, sz, src)    — 读取内核空间内存
- * bpf_probe_write_user(dst, src, sz)     — 写入用户空间内存（需特权）
+ * bpf_probe_read_user(dst, sz, src)      — Read user-space memory
+ * bpf_probe_read_user_str(dst, sz, src)  — Read user-space string
+ * bpf_probe_read_kernel(dst, sz, src)    — Read kernel-space memory
+ * bpf_probe_write_user(dst, src, sz)     — Write user-space memory (requires privileges)
  *
- * bpf_map_lookup_elem(map, key)               — 查找 Map 元素
- * bpf_map_update_elem(map, key, val, flags)   — 更新 Map 元素
- * bpf_map_delete_elem(map, key)               — 删除 Map 元素
+ * bpf_map_lookup_elem(map, key)               — Find Map element
+ * bpf_map_update_elem(map, key, val, flags)   — Update Map element
+ * bpf_map_delete_elem(map, key)               — Delete Map element
  *
- * bpf_printk(fmt, ...)               — 调试输出（/sys/kernel/debug/tracing/trace_pipe）
+ * bpf_printk(fmt, ...)               — Debug output (/sys/kernel/debug/tracing/trace_pipe)
  *
- * BPF_CORE_READ(ptr, field)          — CO-RE 安全读取结构体字段
- * BPF_CORE_READ(ptr, f1, f2)         — 链式读取 ptr->f1->f2
+ * BPF_CORE_READ(ptr, field)          — CO-RE safe read of struct field
+ * BPF_CORE_READ(ptr, f1, f2)         — Chained safe read ptr->f1->f2
  * ================================================================ */

