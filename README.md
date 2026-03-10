@@ -46,21 +46,21 @@ eBPFsploit is a modular post-exploitation framework that leverages Linux eBPF to
     ![Godmode Verification](src/08_godmode.png)
     *Hot-reconfiguring godmode parameters at runtime.*
 * **Credential Hijacking (`golden_key`)**: Hooks `libcrypt` to implement a master password, allowing authentication bypass on SSH/PAM-based services.
-    ![Golden Key interception](src/03_golden_key.png)
-    *Intercepting authentication flow.*
-    ![Golden Key analysis](src/04_golden_key.png)
-    *Analyzing intercepted credentials.*
-    ![Golden Key bypass](src/05_golden_key.png)
-    *Hot-reconfiguring the master password at runtime.*
+    ![Un-hijacked Password](src/03_golden_key.png)
+    *Normal Authentication Behavior: Login fails when providing an incorrect password before the master password is injected.*
+    ![Hijacked Password](src/04_golden_key.png)
+    *Credential Hijacking Active: Successfully authenticating as root using the injected 'golden key' master password.*
+    ![Hot-reconfiguring Password](src/05_golden_key.png)
+    *Runtime Reconfiguration: Dynamically changing the master password on-the-fly via the C2 console without reloading the module.*
 * **File/Process Persistence (`guard`)**: Uses **LSM BPF** to protect the Agent binary and processes. Even the `root` user cannot `kill`, `rm`, or `mv` the protected artifacts.
-    ![Guard Loading](src/09_guard.png)
-    *Loading the guard module.*
-    ![Guard Protection 1](src/10_guard.png)
-    *File protection active.*
-    ![Guard Protection 2](src/11_guard.png)
-    *Hot-reconfiguring protection targets: Attempting to delete protected files.*
-    ![Guard Protection 3](src/12_guard.png)
-    *Hot-reconfiguring protection targets: Process protection active.*
+    ![File Protection](src/09_guard.png)
+    *LSM File Protection: Even the root user receives 'Permission denied' when attempting to remove or rename protected files.*
+    ![Process Protection](src/10_guard.png)
+    *LSM Process Protection: Protected agent processes cannot be terminated (SIGKILL blocked at the kernel level).*
+    ![Hot-reconfiguring File](src/11_guard.png)
+    *Dynamic File Guarding: Hot-swapping the protected inode targets via the console to instantly protect newly created files.*
+    ![Hot-reconfiguring Process](src/12_guard.png)
+    *Dynamic Process Guarding: Hot-swapping the protected PIDs via the console to instantly shield new processes.*
 
 **Framework Highlights:**
 
@@ -297,9 +297,10 @@ XDP program that hides the Agent's listening port at the network driver level. U
 
 # Or manually via console:
 # use stealth_link
-# set target 4444
+# set target_port 4444
+# set target_ip 1.2.3.4 5.6.7.8
 # run
-# update <session_id> whitelist 1.2.3.4 5.6.7.8
+# update <session_id> target_ip 9.10.11.12
 
 # In Bind mode: First console connection gets auto-whitelisted, then port locks down.
 # In Reverse mode: The target IP is auto-whitelisted from the start.
