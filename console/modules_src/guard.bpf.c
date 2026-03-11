@@ -38,8 +38,32 @@ struct {
 SEC("lsm/inode_permission")
 int BPF_PROG(restrict_permission, struct inode *inode, int mask) {
     u64 ino = BPF_CORE_READ(inode, i_ino);
-    if (mask != 0 && bpf_map_lookup_elem(&target_inodes, &ino))
+    // MAY_WRITE is 2, MAY_APPEND is 8. Block any write attempts.
+    if ((mask & 2 || mask & 8) && bpf_map_lookup_elem(&target_inodes, &ino))
         return -13; /* -EACCES */
+    return 0;
+}
+
+/* 1.5 File Open Interception: Block write/truncate open flags */
+SEC("lsm/file_open")
+int BPF_PROG(restrict_open, struct file *file) {
+    u64 ino = BPF_CORE_READ(file, f_inode, i_ino);
+    if (bpf_map_lookup_elem(&target_inodes, &ino)) {
+        unsigned int flags = BPF_CORE_READ(file, f_flags);
+        // O_WRONLY=01, O_RDWR=02, O_APPEND=02000, O_TRUNC=01000
+        if (flags & (00000001 | 00000002 | 00001000 | 00002000))
+            return -13; // EACCES
+    }
+    return 0;
+}
+
+/* 1.6 File Truncate Interception: Block truncate() syscalls */
+SEC("lsm/path_truncate")
+int BPF_PROG(restrict_truncate, const struct path *path) {
+    struct dentry *dentry = BPF_CORE_READ(path, dentry);
+    u64 ino = BPF_CORE_READ(dentry, d_inode, i_ino);
+    if (bpf_map_lookup_elem(&target_inodes, &ino))
+        return -13;
     return 0;
 }
 
@@ -50,7 +74,6 @@ int BPF_PROG(restrict_rename,
              const struct path *new_dir, struct dentry *new_dentry) {
     u64 ino = BPF_CORE_READ(old_dentry, d_inode, i_ino);
     if (bpf_map_lookup_elem(&target_inodes, &ino)) {
-        bpf_printk("[guard] rename blocked: inode %llu\n", ino);
         return -1; /* -EPERM */
     }
     return 0;
@@ -77,7 +100,6 @@ int trace_exit_execve(struct trace_event_raw_sys_exit *ctx) {
         u32 pid = bpf_get_current_pid_tgid() >> 32;
         u32 val = 1;
         bpf_map_update_elem(&target_pids, &pid, &val, BPF_ANY);
-        bpf_printk("[guard] PID %u auto-protected (inode %llu)\n", pid, ino);
     }
     return 0;
 }

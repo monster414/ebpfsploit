@@ -148,8 +148,6 @@ int handle_openat_enter(struct trace_event_raw_sys_enter *ctx) {
 
         /* Check if inside target set */
         // if (bpf_map_lookup_elem(&my_targets, &pid)) { ... }
-
-        bpf_printk("TEMPLATE: openat intercepted, pid=%d\n", pid);
     }
     return 0;
 }
@@ -174,7 +172,6 @@ int handle_openat_exit(struct trace_event_raw_sys_exit *ctx) {
 // SEC("kprobe/tcp_v4_connect")
 // int BPF_KPROBE(hook_tcp_connect, struct sock *sk) {
 //     u32 pid = bpf_get_current_pid_tgid() >> 32;
-//     bpf_printk("TEMPLATE: tcp_connect from pid=%d\n", pid);
 //     return 0;
 // }
 
@@ -231,8 +228,6 @@ int handle_openat_exit(struct trace_event_raw_sys_exit *ctx) {
  * bpf_map_lookup_elem(map, key)               — Find Map element
  * bpf_map_update_elem(map, key, val, flags)   — Update Map element
  * bpf_map_delete_elem(map, key)               — Delete Map element
- *
- * bpf_printk(fmt, ...)               — Debug output (/sys/kernel/debug/tracing/trace_pipe)
  *
  * BPF_CORE_READ(ptr, field)          — CO-RE safe read of struct field
  * BPF_CORE_READ(ptr, f1, f2)         — Chained safe read ptr->f1->f2

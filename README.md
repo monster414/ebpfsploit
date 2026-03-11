@@ -20,47 +20,10 @@
 eBPFsploit is a modular post-exploitation framework that leverages Linux eBPF to perform **kernel-level** offensive operations — privilege escalation, credential hijacking, process/port hiding, file protection, and C2 communication stealth — all without kernel modules or disk artifacts.
 
 > [!IMPORTANT]
-> **Technical Note:** The `netghost` module is currently unavailable due to `EACCES` errors (BPF program complexity limits during verification). It is being refactored for future compatibility.
 
 > **⚠️ Disclaimer:** This tool is intended for **authorized security research and penetration testing only**. Unauthorized use against systems you do not own or have explicit permission to test is illegal. The author assumes no liability for misuse.
 
-> **🚧 Development Status:** This project is currently **in active development** and has not undergone comprehensive testing. Functionality, stability, and compatibility are not guaranteed. Use at your own risk.
-
 > **🎵 Vibe Coding:** This project was built through Vibe Coding — an AI-assisted development approach where the developer guides the vision and architecture while collaborating with AI to bring it to life.
-
-## ✨ Features
-
-| Module | Capability | Hook Type |
-|---|---|---|
-
-* **Stealthy C2 Communication**: Leverages **XDP (eXpress Data Path)** to hide the Agent's listening port. Only authorized IPs (the Console) can see the port; others receive a spoofed `TCP RST`, making the port appear `closed` rather than `filtered`.
-    ![XDP Stealth Enabled](src/01_xdp_enabled.png)
-    *Scan result with XDP stealth enabled (Port 4444 appears closed).*
-    ![XDP Stealth Disabled](src/02_xdp_disabled.png)
-    *Scan result with XDP stealth disabled (Port 4444 appears filtered/open depending on environment).*
-* **Privilege Escalation (`godmode`)**: Dynamically hijacks `sudoers` read streams to grant any user passwordless sudo access without modifying the actual `/etc/sudoers` file.
-    ![Godmode Loading](src/06_godmode.png)
-    *Loading the godmode module.*
-    ![Godmode Result](src/07_godmode.png)
-    *Achieving root privileges via sudoers hijacking.*
-    ![Godmode Verification](src/08_godmode.png)
-    *Hot-reconfiguring godmode parameters at runtime.*
-* **Credential Hijacking (`golden_key`)**: Hooks `libcrypt` to implement a master password, allowing authentication bypass on SSH/PAM-based services.
-    ![Un-hijacked Password](src/03_golden_key.png)
-    *Normal Authentication Behavior: Login fails when providing an incorrect password before the master password is injected.*
-    ![Hijacked Password](src/04_golden_key.png)
-    *Credential Hijacking Active: Successfully authenticating as root using the injected 'golden key' master password.*
-    ![Hot-reconfiguring Password](src/05_golden_key.png)
-    *Runtime Reconfiguration: Dynamically changing the master password on-the-fly via the C2 console without reloading the module.*
-* **File/Process Persistence (`guard`)**: Uses **LSM BPF** to protect the Agent binary and processes. Even the `root` user cannot `kill`, `rm`, or `mv` the protected artifacts.
-    ![File Protection](src/09_guard.png)
-    *LSM File Protection: Even the root user receives 'Permission denied' when attempting to remove or rename protected files.*
-    ![Process Protection](src/10_guard.png)
-    *LSM Process Protection: Protected agent processes cannot be terminated (SIGKILL blocked at the kernel level).*
-    ![Hot-reconfiguring File](src/11_guard.png)
-    *Dynamic File Guarding: Hot-swapping the protected inode targets via the console to instantly protect newly created files.*
-    ![Hot-reconfiguring Process](src/12_guard.png)
-    *Dynamic Process Guarding: Hot-swapping the protected PIDs via the console to instantly shield new processes.*
 
 **Framework Highlights:**
 
@@ -112,13 +75,13 @@ pip install -r console/requirements.txt
 
 ### Build Targets
 
-| Target | Description |
-|---|---|
-| `make all` | Build Agent binary + compile all BPF modules |
-| `make agent` | Build only the Agent (`agent/agent`) |
-| `make modules` | Compile only the eBPF modules → `console/modules/` |
+| Target           | Description                                             |
+| ---------------- | ------------------------------------------------------- |
+| `make all`     | Build Agent binary + compile all BPF modules            |
+| `make agent`   | Build only the Agent (`agent/agent`)                  |
+| `make modules` | Compile only the eBPF modules →`console/modules/`    |
 | `make vmlinux` | Generate `vmlinux.h` from `/sys/kernel/btf/vmlinux` |
-| `make clean` | Remove all build artifacts |
+| `make clean`   | Remove all build artifacts                              |
 
 ### Generate a Unique Agent (Anti-Hash Detection)
 
@@ -155,12 +118,12 @@ python3 console/console.py 4444
 ebpfsploit > list                          # List available modules
 ebpfsploit > use godmode                   # Select module
 ebpfsploit (godmode) > show options        # View configuration
-ebpfsploit (godmode) > set target "\nuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
+ebpfsploit (godmode) > set target user     # Set target user for privilege escalation
 ebpfsploit (godmode) > run                 # Deploy to target kernel
 
 ebpfsploit > sessions                      # List active sessions
 ebpfsploit > show session 1                # View session details
-ebpfsploit > update 1 target "\nnewuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
+ebpfsploit > update 1 target newuser       # Change the target user dynamically
 ebpfsploit > unload 1                      # Remove module from kernel (alias: kill)
 ebpfsploit > kill 2                        # Close session 2
 ebpfsploit > update 1 target 80 443 8080   # Multiple value update (overwrites map)
@@ -210,13 +173,13 @@ Instead of silently dropping unauthorized packets (which nmap reports as `filter
 <details>
 <summary><b>godmode</b> — Sudoers Hijacking</summary>
 
-Hooks `openat` and `read` syscalls via tracepoints. When a process reads `/etc/sudoers`, the content returned to userspace is replaced with an injected rule granting passwordless sudo.
+Hooks `openat` and `read` syscalls via tracepoints. When the `sudo` or `visudo` process reads `/etc/sudoers`, the content returned to userspace is replaced with an injected rule granting passwordless sudo. A strict process name (`comm`) filter ensures the payload remains completely invisible to standard editors or tools like `cat`.
 
 **Requires:** root, tracefs, `bpf_probe_write_user`
 
 ```bash
 use godmode
-set target "\nuser ALL=(ALL:ALL) NOPASSWD:ALL\n"
+set target user
 run
 ```
 
@@ -256,7 +219,7 @@ update <session_id> target <pid_to_hide> <another_pid>
 <details>
 <summary><b>netghost</b> — Port Hiding</summary>
 
-Hooks reads on `/proc/net/tcp` and blanks out lines containing hidden ports. Tools like `ss` and `netstat` can no longer see the listening port.
+Hooks Netlink socket receives (`recvmsg`/`recvfrom`) to intercept and neutralize network diagnostic messages, making hidden ports invisible to `ss`. Simultaneously hooks `execve` to silently hijack any execution of `netstat` into `ss`.
 
 **Requires:** root, tracefs, `bpf_probe_write_user`
 
@@ -271,7 +234,7 @@ update <session_id> target 4444 80 22
 <details>
 <summary><b>guard</b> — File & Process Protection</summary>
 
-Uses LSM BPF hooks (`inode_permission`, `path_rename`, `path_unlink`, `task_kill`) to block deletion, renaming, and killing of protected targets — **even root cannot bypass it**.
+Uses powerful LSM BPF hooks (`inode_permission`, `file_open`, `path_truncate`, `path_rename`, `path_unlink`, `task_kill`) to completely block writing, truncation, deletion, renaming, and killing of protected targets — **even root cannot bypass it**.
 
 **Requires:** root, LSM BPF support, CAP_MAC_ADMIN
 
